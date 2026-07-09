@@ -1,0 +1,33 @@
+package dev.pdalink.prototype;
+
+final class ProxyActions {
+    static final String ACTION_START = "dev.pdalink.prototype.START";
+    static final String ACTION_START_USB = "dev.pdalink.prototype.START_USB";
+    static final String ACTION_START_PRODUCT_USB = "dev.pdalink.prototype.START_PRODUCT_USB";
+    static final String ACTION_START_WIFI_DIRECT = "dev.pdalink.prototype.START_WIFI_DIRECT";
+    static final String ACTION_STOP = "dev.pdalink.prototype.STOP";
+    static final String ACTION_REFRESH = "dev.pdalink.prototype.REFRESH";
+    static final String ACTION_STATUS = "dev.pdalink.prototype.STATUS";
+    static final String EXTRA_STATUS = "status";
+    static final String EXTRA_PROXY_STATUS = "proxy_status";
+    static final String EXTRA_PROXY_PORT = "proxy_port";
+    static final String EXTRA_MODE = "mode";
+    static final String EXTRA_EGRESS = "egress";
+    static final String EXTRA_GROUP_SSID = "group_ssid";
+    static final String EXTRA_GROUP_PASSPHRASE = "group_passphrase";
+    static final String EXTRA_GROUP_INTERFACE = "group_interface";
+    static final String EXTRA_LINUX_TARGET = "linux_target";
+    static final String EXTRA_LAST_REQUEST = "last_request";
+    static final String EXTRA_LAST_ERROR = "last_error";
+    static final String EXTRA_CLIENT_COUNT = "client_count";
+    static final String EXTRA_TRAFFIC_UP_BYTES = "traffic_up_bytes";
+    static final String EXTRA_TRAFFIC_DOWN_BYTES = "traffic_down_bytes";
+    static final String EXTRA_PRODUCT_USB_STATUS = "product_usb_status";
+
+    static final String MODE_USB = "USB";
+    static final String MODE_PRODUCT_USB = "Product USB";
+    static final String MODE_WIFI_DIRECT = "Wi-Fi Direct";
+
+    private ProxyActions() {
+    }
+}

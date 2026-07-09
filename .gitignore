@@ -1,0 +1,11 @@
+.llm-wiki/
+.tools/
+android/.gradle/
+android/build/
+android/app/build/
+*.apk
+*.ap_
+*.dex
+*.class
+__pycache__/
+.pytest_cache/
