@@ -34,11 +34,13 @@ class AndroidWifiBandContractTest(unittest.TestCase):
         ]
         self.assertNotIn("WifiDirectBand.AUTO", failure_block)
 
-    def test_service_preserves_credentials_and_recreates_only_for_mismatch(self):
-        self.assertIn("rememberGroupCredentials(group)", self.service)
+    def test_service_preserves_owned_credentials_and_recreates_only_for_mismatch(self):
+        self.assertIn("isOwnedWifiGroup(group)", self.service)
+        self.assertIn("rejectUnownedWifiGroup()", self.service)
         self.assertIn("loadOrCreateGroupCredentials()", self.service)
         self.assertIn("PREF_WIFI_DIRECT_SSID", self.service)
         self.assertIn("PREF_WIFI_DIRECT_PASSPHRASE", self.service)
+        self.assertIn('^DIRECT-PD-PdaLink-', self.service)
         self.assertIn("WifiDirectBand.matchesFrequency(requestedWifiBand, frequencyMhz)", self.service)
         self.assertIn("recreateGroupForRequestedBand(frequencyMhz)", self.service)
 
@@ -46,7 +48,7 @@ class AndroidWifiBandContractTest(unittest.TestCase):
         self.assertIn("EXTRA_WIFI_BAND", self.actions)
         self.assertIn("EXTRA_WIFI_FREQUENCY_MHZ", self.actions)
         self.assertIn("group.getFrequency()", self.service)
-        self.assertIn("Wi-Fi Direct band: requested", self.activity)
+        self.assertIn('wifiBand = "requested " + WifiDirectBand.label(requestedBand)', self.activity)
         self.assertIn("WifiDirectBand.frequencyLabel(frequencyMhz)", self.activity)
 
     def test_pre_android_10_falls_back_to_automatic_only(self):

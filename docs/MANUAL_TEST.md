@@ -53,7 +53,12 @@ If using Android Studio:
 4. Tap `Start USB`, then `Add Wi-Fi Direct`.
 5. Wait for group information.
 6. Confirm the summary shows both the requested band and actual frequency.
-7. Note the SSID and passphrase shown by the app.
+7. Confirm `P2P group ownership` reports `PdaLink`.
+8. Note the SSID and passphrase shown by the app.
+
+If another app already owns a Wi-Fi Direct group, PdaLink must report that it
+does not own the group, keep the Wi-Fi Direct proxy closed, and leave the
+existing group untouched. Stop that group explicitly before retrying PdaLink.
 
 Changing the band while a group is active briefly disconnects Wi-Fi Direct
 clients and recreates the group. The app reuses the same SSID and passphrase.
@@ -69,6 +74,65 @@ Verify all modes on Android 10 or later:
    between 4900 and 5899 MHz.
 4. Confirm the SSID and passphrase are unchanged across steps 2 and 3.
 5. Confirm the USB proxy remains reachable throughout the band changes.
+
+## Local-Only Hotspot Multi-Client
+
+This mode is simpler than Wi-Fi Direct for ordinary Wi-Fi clients. Android
+creates a local AP, but does not attach Android tethering or an internet
+upstream to it. PdaLink listens on that AP and each client sends HTTP/HTTPS
+traffic explicitly through the displayed proxy.
+
+1. Tap `Start USB`, then `Add Local Hotspot`.
+2. Approve the Android or vendor hotspot dialog if it appears on first use.
+3. Read `Wi-Fi network`, `Wi-Fi security`, and `Wi-Fi target` from the app.
+4. Join two clients using the current SSID and password.
+5. Configure each Wi-Fi profile as local-only: no default route, no automatic
+   DNS, and no IPv6 default route.
+6. Fetch `<Wi-Fi target>/proxy.pac` and make an HTTPS request using the same
+   target as an explicit HTTP proxy from both clients at the same time.
+7. Confirm USB proxy traffic still succeeds while both Wi-Fi clients are
+   active.
+
+Expected results:
+
+- The Wi-Fi target uses the dynamically discovered hotspot address and port
+  `8001`; it is not assumed to be `192.168.49.1`.
+- Android reports the AP as local-only with no tethering upstream.
+- Both clients receive HTTP responses through the PdaLink proxy while keeping
+  their normal default route unchanged.
+- `Wi-Fi clients` displays `not exposed`; Android's public Local-Only Hotspot
+  reservation API does not provide this count to the app.
+
+Stop and recreate the reservation before testing credential recovery. If the
+SSID or password changes, replace the saved client profile values with the
+current app summary. Also check `Wi-Fi security`: some phones create a
+WPA2/WPA3 transition network that older WPA2-only adapters cannot join even
+when the password is correct.
+
+On an authorized Linux ADB host, test automatic profile refresh without
+printing the password:
+
+```bash
+./tools/pdalink.sh wifi local-hotspot sync --mode auto --connect
+```
+
+Then test the host-side rotation guard:
+
+```bash
+./tools/pdalink.sh wifi local-hotspot sync --mode pinned
+# Recreate the Android reservation. A changed credential must be rejected.
+./tools/pdalink.sh wifi local-hotspot sync --mode pinned
+./tools/pdalink.sh wifi local-hotspot sync --mode pinned --reset-pin
+```
+
+The pin file contains the SSID and a password hash with mode `0600`, not the
+password. NetworkManager retains the connection secret in its normal profile.
+Pinned mode cannot force Android to reuse credentials because the public
+Local-Only Hotspot API does not accept an app-selected SSID or passphrase.
+Verify that opening the app, refreshing status, restarting only the USB
+watcher, and repeating a Local Hotspot start while its reservation is already
+active do not change the credential fingerprint. A stop followed by a new
+explicit start is a new Android reservation and may rotate it.
 
 ## Linux Connection
 
@@ -175,11 +239,21 @@ The Android app summary should show:
 - `Mode: USB + Wi-Fi Direct`.
 - `USB proxy: listening on 127.0.0.1:8000`.
 - `Wi-Fi Direct proxy: listening on 192.168.49.1:8001`.
+- `P2P group ownership: PdaLink`.
+- `P2P group clients:` with the number of devices currently joined to the
+  Direct group.
+- `Active proxy connections:` reported separately from group membership.
 - `Wi-Fi Direct:` with SSID, passphrase, and P2P interface.
 - `Wi-Fi Direct band:` with the requested mode and actual MHz.
 - `USB target: http://127.0.0.1:8000`.
 - `Wi-Fi Direct target: http://192.168.49.1:8001`.
 - `Last request:` changing when `probe` or `curl-test` runs.
+
+For the multi-client gate, join the displayed group from two separate devices,
+refresh the Android summary, and require `P2P group clients: 2`. Run an HTTPS
+proxy request from both devices at the same time, then disconnect one device and
+require the count to return to `1`. Repeated connect/disconnect churn or either
+request bypassing `192.168.49.1:8001` fails the gate.
 
 ## Debugging
 
@@ -352,11 +426,167 @@ The stop action restores the backed-up Windows proxy settings, removes only the
 temporary PdaLink `tcp:18080` ADB forward, and stops the PdaLink debug service.
 It leaves unrelated ADB forwards untouched.
 
-This mode covers Windows components and applications that honor the WinINET or
-.NET system proxy. It is not yet a raw-socket full tunnel. Applications that
-ignore system proxy settings, ICMP, arbitrary UDP, and adapter-level routing
-need the future Windows TUN/virtual-adapter implementation described in
-`docs/IMPLEMENTATION_PLAN.md`.
+This USB mode covers Windows components and applications that honor the
+WinINET or .NET system proxy. It is not a raw-socket tunnel. The separate
+experimental Wi-Fi Direct Wintun stage below covers IPv4 TCP and UDP/53, but
+does not turn the USB path into a Windows virtual adapter.
+
+## Windows Wi-Fi Direct Stage 1: Managed PAC
+
+This implementation is present but must remain labelled unverified until the
+following smoke passes on both Windows 10 and Windows 11. Start with the Android
+app showing an active `DIRECT-*` group and `Wi-Fi Direct proxy: listening on
+192.168.49.1:8001`.
+
+First parse all Windows scripts without executing them:
+
+```powershell
+$failed = $false
+Get-ChildItem .\tools\windows_*.ps1 | ForEach-Object {
+  $tokens = $null
+  $errors = $null
+  [System.Management.Automation.Language.Parser]::ParseFile(
+    $_.FullName, [ref]$tokens, [ref]$errors
+  ) > $null
+  if ($errors.Count) {
+    $failed = $true
+    $errors | Format-List
+  }
+}
+if ($failed) { exit 1 }
+```
+
+Record the current user proxy values, then start. Do not pass the password as a
+plain command-line string; the script prompts with `Read-Host -AsSecureString`.
+
+```powershell
+$internetSettings = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+$key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey(
+  'Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+)
+$proxySnapshot = foreach ($name in 'ProxyEnable','ProxyServer','ProxyOverride','AutoConfigURL','AutoDetect') {
+  if ($key.GetValueNames() -contains $name) {
+    [pscustomobject]@{
+      name = $name
+      kind = $key.GetValueKind($name).ToString()
+      value = $key.GetValue($name, $null,
+        [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    }
+  } else { [pscustomobject]@{ name = $name; kind = 'absent'; value = $null } }
+}
+$key.Close()
+$proxySnapshot | ConvertTo-Json | Set-Content -Encoding UTF8 "$env:TEMP\pdalink-proxy-before.json"
+Get-NetRoute -AddressFamily IPv4 | ConvertTo-Json -Depth 4 |
+  Set-Content -Encoding UTF8 "$env:TEMP\pdalink-routes-before.json"
+Get-DnsClientServerAddress | ConvertTo-Json -Depth 4 |
+  Set-Content -Encoding UTF8 "$env:TEMP\pdalink-dns-before.json"
+netsh wlan show profiles > "$env:TEMP\pdalink-wlan-before.txt"
+netsh winhttp show proxy > "$env:TEMP\pdalink-winhttp-before.txt"
+
+powershell -ExecutionPolicy Bypass -File .\tools\windows_wifi_direct_internet.ps1 start `
+  -Ssid 'DIRECT-...'
+powershell -ExecutionPolicy Bypass -File .\tools\windows_wifi_direct_internet.ps1 status
+powershell -ExecutionPolicy Bypass -File .\tools\windows_wifi_direct_internet.ps1 test `
+  -Url https://cloudflare.com/cdn-cgi/trace
+powershell -ExecutionPolicy Bypass -File .\tools\windows_wifi_direct_internet.ps1 stop
+```
+
+Acceptance:
+
+- the temporary WLAN XML no longer exists after profile import;
+- the state file contains no password or `keyMaterial`;
+- `status` reports `active`, exact PAC, Wi-Fi interface, and `192.168.49.x`
+  source while running;
+- `test` resolves the public URL through `192.168.49.1:8001` using the Windows
+  system proxy;
+- stop restores all five WinINET values, including value absence and registry
+  type, then removes only the GUID-owned WLAN profile;
+- existing default routes, DNS, USB ADB forwards, WinHTTP proxy, and unrelated
+  WLAN profiles are unchanged.
+
+Repeat with initial WinINET states `none`, manual proxy, existing PAC, and
+auto-detect, including a `REG_EXPAND_SZ` PAC value containing `%LOCALAPPDATA%`
+and non-ASCII SSID/interface names. Compare the typed registry snapshot and the
+route, DNS, WLAN, and WinHTTP snapshots after stop. Also exercise wrong
+SSID/password, unreachable PAC, and a reachable non-canonical PAC (including a
+correct endpoint hidden in a comment or dead branch); all must leave WinINET
+untouched. While active, change `AutoConfigURL` manually and confirm normal stop
+refuses drift. Inspect it before using `stop -Force` to recover the saved
+snapshot.
+
+## Windows Wi-Fi Direct Stage 2: Experimental Wintun IPv4 Tunnel
+
+This stage requires Python 3.10+ and an elevated PowerShell window. It carries
+IPv4 TCP and UDP/53 DNS only. It does not carry IPv6, ICMP, arbitrary UDP, or
+QUIC, and the hand-built TCP state machine is not product-grade.
+
+Install the pinned official signed Wintun DLL once, then start without Stage 1
+PAC state active:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\windows_wifi_direct_tunnel.ps1 setup
+powershell -ExecutionPolicy Bypass -File .\tools\windows_wifi_direct_tunnel.ps1 start `
+  -Ssid 'DIRECT-...'
+powershell -ExecutionPolicy Bypass -File .\tools\windows_wifi_direct_tunnel.ps1 status
+powershell -ExecutionPolicy Bypass -File .\tools\windows_wifi_direct_tunnel.ps1 test `
+  -Url https://cloudflare.com/cdn-cgi/trace
+```
+
+While active, verify ownership and route selection:
+
+```powershell
+Find-NetRoute -RemoteIPAddress 192.168.49.1
+Find-NetRoute -RemoteIPAddress 1.1.1.1
+Get-NetRoute -DestinationPrefix 192.168.49.1/32,0.0.0.0/1,128.0.0.0/1
+Get-NetAdapter -Name 'PdaLink-*'
+Get-NetIPInterface -InterfaceAlias 'PdaLink-*' -AddressFamily IPv4
+Get-DnsClientServerAddress -InterfaceAlias 'PdaLink-*' -AddressFamily IPv4
+curl.exe --proxy "" --noproxy "*" -4 https://cloudflare.com/cdn-cgi/trace
+Resolve-DnsName example.com -Type A -Server 1.1.1.1 -DnsOnly -NoHostsFile
+```
+
+Expected:
+
+- the proxy `/32` route and selected source stay on the Wi-Fi interface;
+- both `/1` routes select the GUID-suffixed PdaLink Wintun adapter;
+- DNS servers are assigned only to that Wintun interface;
+- no-proxy `curl.exe -4` and an A-record lookup succeed;
+- the protected ProgramData state includes PID/start ticks, exact interfaces,
+  routes, DLL hash and cleanup paths, but no Wi-Fi password.
+
+Stop and verify exact cleanup:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\windows_wifi_direct_tunnel.ps1 stop
+Get-NetRoute -DestinationPrefix 192.168.49.1/32,0.0.0.0/1,128.0.0.0/1 `
+  -ErrorAction SilentlyContinue
+Get-NetAdapter -Name 'PdaLink-*' -ErrorAction SilentlyContinue
+Get-NetIPInterface -InterfaceAlias 'PdaLink-*' -AddressFamily IPv4 -ErrorAction SilentlyContinue
+Get-DnsClientServerAddress -InterfaceAlias 'PdaLink-*' -AddressFamily IPv4 `
+  -ErrorAction SilentlyContinue
+netsh wlan show profiles
+Test-Path "$env:ProgramData\PdaLink\runtime\windows-wifi-direct-tunnel.json"
+```
+
+The PdaLink route/adapter/interface/DNS queries must return no owned object and
+the state path must return `False`. Repeat with a bad proxy, a foreign pre-existing `/1`
+route, forced Python termination, Android disconnect, and suspend/resume.
+`start` must roll back partial state; stale recovery must remove only entries
+matching the saved prefix, interface, and next hop after first confirming the
+saved adapter name/index pair. While active, change an owned `/1` or proxy `/32`
+route metric and confirm stop still removes it. Simulate interface-index reuse
+and confirm stop retains state without deleting the new adapter's routes. Keep
+the state file when any cleanup step fails. Use `stop -Force` only to ignore
+deletion of an already-removed PdaLink WLAN profile, never to delete a foreign
+route. The post-stop proxy `/32`, DNS, MTU/metric, GUID WLAN profile, and
+ProgramData state must all be absent or equal their pre-start snapshots.
+
+Performance remains a manual diagnostic gate: compare three explicit-proxy and
+three Wintun transfers, require Wintun median throughput at least 70% of the
+explicit proxy, verify a 1 GiB transfer checksum, keep an idle TCP session for
+30 minutes, and test 64 simultaneous TCP/DNS operations. Any disconnect,
+checksum mismatch, unbounded memory growth, or failure to clean routes blocks a
+product-ready claim.
 
 ## WSL 2 Relay For Windows ADB Forward
 

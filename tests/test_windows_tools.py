@@ -8,6 +8,139 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class WindowsToolScriptTest(unittest.TestCase):
+    def test_windows_wifi_direct_common_secures_credentials_and_trusts_exact_pac(self):
+        common = (ROOT / "tools" / "windows_wifi_direct_common.ps1").read_text()
+
+        self.assertIn("[Security.SecureString]$Password", common)
+        self.assertNotIn("[string]$Password", common)
+        self.assertIn("SecureStringToBSTR", common)
+        self.assertIn("ZeroFreeBSTR", common)
+        self.assertIn("[Xml.XmlWriter]::Create", common)
+        self.assertIn('"connectionMode", $namespace, "manual"', common)
+        self.assertIn('"autoSwitch", $namespace, "false"', common)
+        self.assertIn('"authentication", $namespace, "WPA2PSK"', common)
+        self.assertIn('"encryption", $namespace, "AES"', common)
+        self.assertIn('"user=current"', common)
+        self.assertIn("Remove-Item -LiteralPath $tempPath", common)
+        self.assertIn("finally", common)
+        self.assertIn("Find-NetRoute -RemoteIPAddress", common)
+        self.assertIn('source_address -notlike "192.168.49.*"', common)
+        self.assertIn('--noproxy "*"', common)
+        self.assertIn("body does not match the canonical PdaLink PAC", common)
+        self.assertIn('$normalized -cne $expected', common)
+        self.assertIn("PdaLink-WiFi-Direct-[0-9a-f]{32}", common)
+        self.assertNotIn("Invoke-Expression", common)
+
+    def test_windows_wifi_direct_phase1_is_transactional_and_drift_aware(self):
+        script = (ROOT / "tools" / "windows_wifi_direct_internet.ps1").read_text()
+
+        self.assertIn('[ValidateSet("start", "stop", "status", "test")]', script)
+        self.assertIn("Read-Host \"Wi-Fi Direct password shown by Android\" -AsSecureString", script)
+        self.assertIn("http://${ProxyAddress}:$ProxyPort/proxy.pac", script)
+        self.assertIn('ProxyEnable"; exists = $true; kind = "DWord"; value = 0', script)
+        self.assertIn('AutoConfigURL"; exists = $true; kind = "String"; value = $PacUrl', script)
+        self.assertIn('AutoDetect"; exists = $true; kind = "DWord"; value = 0', script)
+        self.assertIn("[IO.FileMode]::CreateNew", script)
+        self.assertIn("before = $before", script)
+        self.assertIn("applied = $applied", script)
+        self.assertIn("Test-InternetSettingsValuesEqual", script)
+        self.assertIn("InternetSetOption", script)
+        self.assertIn("GetLastWin32Error", script)
+        self.assertIn("DoNotExpandEnvironmentNames", script)
+        self.assertIn("[IO.File]::ReadAllText", script)
+        self.assertIn('--proxy $proxyUrl --noproxy ""', script)
+        self.assertIn("Rolling back failed Wi-Fi Direct proxy start", script)
+        self.assertIn("restore state retained", script)
+        self.assertIn('state = "drifted"', script)
+        self.assertIn("refusing to overwrite them", script)
+        self.assertIn("-Force is accepted only with stop", script)
+        self.assertIn("proxy restored; WLAN cleanup pending", script)
+        self.assertIn("restore state retained for stop retry", script)
+        self.assertIn("Remove-PdaLinkWifiProfile -ProfileName", script)
+        self.assertNotIn("adb", script.lower())
+        self.assertNotIn("winhttp", script.lower())
+        self.assertNotIn("New-NetRoute", script)
+        self.assertNotIn("Set-DnsClientServerAddress", script)
+
+        verify_index = script.index("Test-PdaLinkWifiDirectEndpoint -Interface $Interface")
+        snapshot_index = script.index("$before = @(Get-InternetSettingsValues)")
+        self.assertLess(verify_index, snapshot_index)
+
+    def test_windows_wintun_setup_pins_official_signed_archive(self):
+        script = (ROOT / "tools" / "windows_wintun_setup.ps1").read_text()
+
+        self.assertIn('[ValidateSet("install", "status")]', script)
+        self.assertIn('https://www.wintun.net/builds/wintun-$WintunVersion.zip', script)
+        self.assertIn("07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51", script)
+        self.assertIn("Get-FileHash -LiteralPath $archivePath -Algorithm SHA256", script)
+        self.assertIn("installed wintun.dll hash does not match", script)
+        self.assertIn('manifest.architecture -ne (Get-WintunArchitecture)', script)
+        self.assertIn("SetAccessRuleProtection($true, $false)", script)
+        self.assertIn("SetOwner($administrators)", script)
+        self.assertIn("ReparsePoint", script)
+        self.assertIn("Get-AuthenticodeSignature", script)
+        self.assertIn("valid WireGuard Authenticode signature", script)
+        self.assertIn('S-1-5-18', script)
+        self.assertIn('S-1-5-32-544', script)
+        self.assertIn("Remove-Item -LiteralPath $archivePath", script)
+        self.assertIn("finally", script)
+
+    def test_windows_wifi_direct_tunnel_owns_routes_process_and_cleanup(self):
+        script = (ROOT / "tools" / "windows_wifi_direct_tunnel.ps1").read_text()
+
+        self.assertIn('[ValidateSet("setup", "start", "stop", "status", "test")]', script)
+        self.assertIn("[Security.SecureString]$Password", script)
+        self.assertNotIn("[string]$Password", script)
+        self.assertIn("Assert-Administrator", script)
+        self.assertIn("SetAccessRuleProtection($true, $false)", script)
+        self.assertIn("phase-1 WinINET PAC state is active", script)
+        self.assertIn("Test-PdaLinkWifiDirectEndpoint -Interface $Interface", script)
+        self.assertIn("Test-PdaLinkRouteConflicts", script)
+        self.assertIn("Get-PdaLinkHostRouteDisposition", script)
+        self.assertIn("[IO.FileMode]::CreateNew", script)
+        self.assertIn('phase = "starting"', script)
+        self.assertIn('$state.phase = "active"', script)
+        self.assertIn("New-NetIPAddress", script)
+        self.assertIn("Set-DnsClientServerAddress", script)
+        self.assertIn("New-NetRoute", script)
+        self.assertIn("-PolicyStore ActiveStore", script)
+        self.assertIn('SplitRoutes = @("0.0.0.0/1", "128.0.0.0/1")', script)
+        self.assertIn('HostRoute = "$ProxyAddress/32"', script)
+        self.assertIn("split routes captured the Android proxy connection", script)
+        self.assertIn('--proxy "" --noproxy "*" -4', script)
+        self.assertIn("Resolve-DnsName", script)
+        self.assertIn('-Server $DnsServers[0]', script)
+        self.assertIn("configured DNS server route", script)
+        self.assertIn("process_start_ticks", script)
+        self.assertIn("Get-CimInstance Win32_Process", script)
+        self.assertIn("[IO.File]::ReadAllText", script)
+        self.assertIn("platform,struct", script)
+        self.assertIn("native-architecture Python", script)
+        self.assertIn("ReparsePoint", script)
+        self.assertIn("Get-AuthenticodeSignature", script)
+        self.assertIn("interface index that may have been reused", script)
+        self.assertIn("created proxy host route still exists", script)
+        self.assertIn("pdalink_wintun.py", script)
+        self.assertIn("Remove-NetRoute -InputObject $route", script)
+        self.assertIn("Remove-NetIPAddress -InputObject $address", script)
+        self.assertIn("-ResetServerAddresses", script)
+        self.assertIn("state retained", script)
+        self.assertIn("Unsupported: IPv6, ICMP, arbitrary UDP/QUIC", script)
+
+        pac_index = script.index("Test-PdaLinkWifiDirectEndpoint -Interface $Interface")
+        state_index = script.index("Write-PdaLinkTunnelStateExclusive -State $state")
+        mutation_index = script.index("Add-PdaLinkTunnelRoutes -State $state")
+        self.assertLess(pac_index, state_index)
+        self.assertLess(state_index, mutation_index)
+
+        route_function = script[
+            script.index("function Add-PdaLinkTunnelRoutes"):
+            script.index("function Test-PdaLinkTransparentInternet")
+        ]
+        host_index = route_function.index("-DestinationPrefix $HostRoute")
+        split_index = route_function.index("foreach ($prefix in $SplitRoutes)")
+        self.assertLess(host_index, split_index)
+
     def test_windows_usb_internet_has_restore_guardrails(self):
         script = (ROOT / "tools" / "windows_usb_internet.ps1").read_text()
 
@@ -103,9 +236,11 @@ class WindowsToolScriptTest(unittest.TestCase):
         wrapper = (ROOT / "tools" / "pdalink.sh").read_text()
 
         self.assertIn(
-            "wifi {start-android|stop-android|scan|connect|status|internet|probe|env|curl-test|test|smoke|doctor}",
+            "wifi {start-android|stop-android|local-hotspot|scan|connect|status|internet|probe|env|curl-test|test|smoke|doctor}",
             wrapper,
         )
+        self.assertIn("wifi local-hotspot sync", wrapper)
+        self.assertIn("local-hotspot-sync", wrapper)
         self.assertIn("wifi internet start", wrapper)
         self.assertIn("wifi internet stop", wrapper)
         self.assertIn("wifi_usage", wrapper)
@@ -177,7 +312,9 @@ class WindowsToolScriptTest(unittest.TestCase):
         self.assertIn("HttpProxyServer usbProxyServer", service)
         self.assertIn("HttpProxyServer wifiProxyServer", service)
         self.assertIn('android:name=".ProxyService"', manifest)
-        self.assertIn('android:exported="true"', manifest)
+        service_manifest = manifest[manifest.index('<service\n            android:name=".ProxyService"') :]
+        self.assertIn('android:exported="true"', service_manifest[:280])
+        self.assertIn('android:permission="android.permission.DUMP"', service_manifest[:280])
         self.assertIn("USB_HOST = \"127.0.0.1\"", service)
 
     def test_android_proxy_preserves_transport_state_and_sanitizes_pac_host(self):
@@ -196,7 +333,7 @@ class WindowsToolScriptTest(unittest.TestCase):
         self.assertIn("ensureUsbProxyServer()", service)
         self.assertIn("ensureWifiProxyServer()", service)
         self.assertIn("clearProxyStartupError(wifiProxyServer)", service)
-        self.assertIn("WIFI_HOST,", service)
+        self.assertIn("wifiProxyHost,", service)
         self.assertIn("clientCount(usbProxyServer) + clientCount(wifiProxyServer)", service)
         self.assertIn("validPacEndpoint(host)", proxy)
         self.assertIn("jsString(endpoint)", proxy)
@@ -207,7 +344,7 @@ class WindowsToolScriptTest(unittest.TestCase):
         self.assertIn("getDownstreamBytes()", service)
         self.assertIn("Internet usage:", activity)
         self.assertIn("USB proxy:", activity)
-        self.assertIn("Wi-Fi Direct proxy:", activity)
+        self.assertIn("Wi-Fi proxy:", activity)
         self.assertIn("ACTION_STOP_WIFI_DIRECT", actions)
         self.assertIn("entry + existing", activity)
 

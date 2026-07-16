@@ -27,7 +27,7 @@ DEFAULT_REMOTE_PORT = int(os.getenv("PDALINK_USB_REMOTE_PORT", "8000"))
 ANDROID_DEBUG_ACTIVITY = "dev.pdalink.prototype/.DebugControlActivity"
 ANDROID_PROXY_SERVICE = "dev.pdalink.prototype/.ProxyService"
 ANDROID_ACTION_START = "dev.pdalink.prototype.START_USB"
-ANDROID_ACTION_STOP = "dev.pdalink.prototype.STOP"
+ANDROID_ACTION_STOP_USB = "dev.pdalink.prototype.STOP_USB"
 
 sys.path.insert(0, str(ROOT / "linux"))
 import pdalink_lite  # noqa: E402
@@ -188,6 +188,7 @@ class PdaLinkWatcher:
         self.sleeper = sleeper
         self.stdout = stdout
         self.state = WatchState.load(config.state_file)
+        self.local_hotspot_sync_after = 0.0
 
     def log(self, message: str) -> None:
         print(message, file=self.stdout)
@@ -340,7 +341,7 @@ class PdaLinkWatcher:
             return
         self.run_write(
             self.adb_command(
-                ["shell", "am", "start-foreground-service", "-n", ANDROID_PROXY_SERVICE, "-a", ANDROID_ACTION_STOP],
+                ["shell", "am", "start-foreground-service", "-n", ANDROID_PROXY_SERVICE, "-a", ANDROID_ACTION_STOP_USB],
                 serial=device.serial,
             ),
             timeout=10.0,
@@ -381,6 +382,28 @@ class PdaLinkWatcher:
             return False, (result.stderr or result.stdout).strip() or "system service start failed"
         self.state.service_owned = not self.config.dry_run
         return True, ""
+
+    def sync_local_hotspot_credentials(
+            self,
+            device: pdalink_lite.AdbDevice,
+            user_config: dict[str, str]) -> None:
+        mode = user_config.get("local_hotspot_credentials", "off")
+        if mode == "off" or time.monotonic() < self.local_hotspot_sync_after:
+            return
+        command = [
+            sys.executable,
+            str(self.config.root / "linux" / "pdalink_lite.py"),
+            "local-hotspot-sync",
+            "--mode", mode,
+            "--if-active",
+            "--serial", device.serial,
+            "--wait", "0",
+        ]
+        result = self.run_write(command, timeout=15.0)
+        inactive = result.returncode == 0 and "inactive" in result.stdout
+        self.local_hotspot_sync_after = time.monotonic() + (5.0 if inactive or result.returncode != 0 else 30.0)
+        if result.returncode != 0:
+            self.log(f"local-hotspot-sync: failed (exit {result.returncode}); USB remains active")
 
     def stop_service(self) -> None:
         if self.config.no_system_service or not self.state.service_owned:
@@ -475,6 +498,8 @@ class PdaLinkWatcher:
         ok, error = self.start_service()
         if not ok:
             return self.cleanup("service-start-failed", device, error)
+
+        self.sync_local_hotspot_credentials(device, user_config)
 
         self.save_state("ready", device)
         self.log(f"ready: {device.serial} -> {self.config.effective_proxy_url}")

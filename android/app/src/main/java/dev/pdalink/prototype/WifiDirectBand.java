@@ -1,5 +1,6 @@
 package dev.pdalink.prototype;
 
+import android.annotation.TargetApi;
 import android.content.Context;
 import android.net.wifi.p2p.WifiP2pConfig;
 import android.os.Build;
@@ -42,6 +43,7 @@ final class WifiDirectBand {
         return normalized;
     }
 
+    @TargetApi(29)
     static int toPlatformBand(String value) {
         switch (normalize(value)) {
             case BAND_2_GHZ:

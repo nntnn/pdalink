@@ -280,13 +280,14 @@ Boundary:
   UDP, and applications that bypass system proxy settings still require a
   full-tunnel adapter.
 
-## Windows Full-Tunnel Adapter Slice
+## Windows Wi-Fi Direct PAC And Experimental Tunnel Slice
 
 Target result:
 
-- Windows gets a real virtual network interface, likely through Wintun or a
-  comparable signed TUN driver, so default IPv4 traffic can be routed through
-  the Android USB path without relying on application proxy support.
+- Stage 1 joins the Android Wi-Fi Direct group and transactionally applies the
+  exact Android PAC to WinINET without requiring per-application proxy setup.
+- Stage 2 gives Windows a real Wintun virtual network interface so IPv4 traffic
+  can use the Android Wi-Fi Direct proxy without application proxy support.
 - A Windows packet adapter reuses the Linux adapter design: read IPv4 packets
   from TUN, convert TCP streams to HTTP `CONNECT` through the Android proxy, and
   convert UDP/53 DNS to TCP DNS through the same proxy.
@@ -299,12 +300,52 @@ Target result:
 
 Stop condition:
 
-- Signed/redistributable TUN dependency choice is documented.
-- Admin-rights install/start/stop scripts exist and refuse to run when the proxy
-  endpoint is not reachable. Native Linux runtime service commands fail fast
-  instead of waiting for background password input.
+- `windows_wifi_direct_internet.ps1 start|status|test|stop` snapshots typed
+  WinINET values, verifies before mutation, rejects drift, and restores exactly.
+- The official signed Wintun 0.14.1 archive URL and SHA-256 are pinned; the
+  architecture DLL is re-hashed before every elevated adapter start.
+- Admin-rights setup/start/stop scripts exist and refuse route mutation when
+  the proxy endpoint is untrusted or unreachable or foreign `/1` routes exist.
 - A no-proxy Windows smoke test succeeds with the system proxy disabled.
 - Cleanup restores Windows routes and removes the virtual interface.
+
+Current status:
+
+- PowerShell scripts, Wintun ctypes backend, protected state, rollback, static
+  tests, fake Wintun lifecycle tests, and shared packet regression tests are
+  implemented.
+- Windows 10/11 real-host driver/WLAN/WinINET/route/DNS/cleanup smoke remains
+  required, so the stage is implemented but unverified.
+- The supported packet claim is IPv4 TCP plus UDP/53. ADR-0003 still classifies
+  the hand-built TCP engine as a short-term diagnostic path. A WFP ALE
+  redirector or mature netstack remains the product direction.
+
+## Local-Only Hotspot Multi-Client Slice
+
+Target result:
+
+- Android reserves a Local-Only Hotspot and discovers its generated interface
+  address instead of assuming the Wi-Fi Direct subnet.
+- USB remains available while multiple ordinary Wi-Fi clients use the hotspot
+  proxy on port `8001`.
+- Wi-Fi client profiles remain local-only and do not install a default route.
+- The app reports Android's selected SSID, password, security mode, interface,
+  and proxy target.
+
+Current status:
+
+- Android ownership, lifecycle cleanup, dynamic address selection, transport
+  mutual exclusion, and operator status are implemented.
+- An ADB-shell-only, `DUMP`-protected receiver exposes the active reservation
+  from process memory. Linux can update the local-only NetworkManager profile
+  automatically or reject rotations using a hash-only pinned guard.
+- A Linux host and Raspberry Pi Zero 2 W have passed simultaneous HTTPS proxy
+  requests on one Local-Only Hotspot while USB remained active.
+- The tested Windows 10 Intel Dual Band Wireless-AC 7260 adapter can scan the
+  phone's WPA2/WPA3 transition AP but cannot associate with it. The public
+  Android reservation API does not provide an app-selected WPA2 fallback.
+- Carrier accounting behavior is not claimed. The acceptance evidence is
+  limited to Android reporting a local-only AP with no tethering upstream.
 
 ## ADB-Free USB Transport Slice
 
@@ -342,7 +383,8 @@ In scope:
 - Built-in Linux TUN-to-HTTP-proxy adapter for IPv4 TCP and UDP/53 DNS over the
   USB-forwarded Android proxy.
 - Windows system proxy automation for USB proxy-aware internet use.
-- Planning and guardrails for a future Windows full-tunnel adapter.
+- Windows Wi-Fi Direct WinINET PAC automation.
+- Experimental Windows Wintun adapter for Wi-Fi Direct IPv4 TCP and UDP/53.
 - Android operator-facing status snapshot.
 - HTTP proxy guardrails for request bodies and malformed targets.
 
@@ -350,7 +392,7 @@ Out of scope for this slice:
 
 - Vendor-specific USB compatibility.
 - A custom USB framing protocol beyond ADB `forward`.
-- Windows kernel/driver full-tunnel adapter for the current slice.
+- Product-grade Windows WFP redirector or mature userspace netstack.
 - Android `VpnService` packet tunnel.
 - SOCKS4/SOCKS5.
 - Full IPv6, ICMP, arbitrary UDP, QUIC/HTTP3, TCP congestion control parity, or

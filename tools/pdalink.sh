@@ -16,7 +16,7 @@ Usage:
   $0 usb status [--local-port PORT] [--remote-port PORT]
   $0 usb test [--install APK] [usb-smoke options...]
   $0 usb stop [--local-port PORT] [--remote-port PORT] [--stop-android]
-  $0 wifi {start-android|stop-android|scan|connect|status|internet|probe|env|curl-test|test|smoke|doctor} [...]
+  $0 wifi {start-android|stop-android|local-hotspot|scan|connect|status|internet|probe|env|curl-test|test|smoke|doctor} [...]
   $0 connection status [--json] [connection-status options...]
   $0 product-usb {status|check|aoa-start} [...]
   $0 status [--json]
@@ -77,6 +77,7 @@ wifi_usage() {
 Usage:
   $0 wifi start-android [--install APK]
   $0 wifi stop-android
+  $0 wifi local-hotspot sync [--mode auto|pinned] [--connect] [--reset-pin] [--start-android]
   $0 wifi scan
   $0 wifi connect [--ssid SSID] --password PASSWORD [--iface IFACE] [--ssid-pattern DIRECT-] [--host HOST] [--ports PORTS]
   $0 wifi status [--ssid-pattern DIRECT-] [--iface IFACE] [--host HOST] [--ports PORTS]
@@ -97,6 +98,11 @@ Manual Wi-Fi Direct flow:
   3. For a connection only, run: $0 wifi connect --password '...'
   4. For a managed GNOME proxy, run: $0 wifi internet start --password '...'
   5. Run: $0 wifi internet status
+
+Local Hotspot credential sync (ADB only):
+  $0 wifi local-hotspot sync --mode auto --start-android --connect
+  $0 wifi local-hotspot sync --mode pinned --connect
+  $0 wifi local-hotspot sync --mode pinned --reset-pin --connect
 EOF
 }
 
@@ -904,6 +910,22 @@ main() {
         stop-android)
           shift
           wifi_stop_android "$@"
+          ;;
+        local-hotspot)
+          shift
+          case "${1:-}" in
+            sync)
+              shift
+              wifi_python_cmd local-hotspot-sync "$@"
+              ;;
+            -h|--help|"")
+              wifi_usage
+              ;;
+            *)
+              wifi_usage >&2
+              exit 2
+              ;;
+          esac
           ;;
         scan)
           shift

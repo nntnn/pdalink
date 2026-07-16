@@ -1,8 +1,8 @@
 # PdaLink
 
-PdaLink is an Android-to-Linux internet-sharing prototype. It provides a local
-Android proxy, USB and Wi-Fi Direct transport experiments, Linux route
-automation, and diagnostic tooling for development and manual testing.
+PdaLink is an Android-to-host internet-sharing prototype. It provides a local
+Android proxy over USB, Wi-Fi Direct, or Android Local-Only Hotspot, plus host
+route automation and diagnostic tooling for development and manual testing.
 
 Install on native Linux:
 
@@ -26,7 +26,8 @@ Start with:
 Prototype layout:
 
 - `android/`: Android app that serves the ADB USB proxy on loopback port `8000`
-  and can concurrently serve Wi-Fi Direct on `192.168.49.1:8001`.
+  and can concurrently serve either Wi-Fi Direct or a Local-Only Hotspot on
+  port `8001`.
 - `linux/`: Python helper for NetworkManager connection, proxy probing, and
   curl-based smoke tests, including an ADB USB-forward proxy mode and an
   experimental TUN/system-routing control plane.
@@ -114,6 +115,41 @@ only as the APK-install safety path. Restore and verify USB first, then turn the
 hotspot off before `wifi start-android`; the USB route keeps the laptop online
 while it joins the `DIRECT-*` network.
 
+Alternatively, tap `Add Local Hotspot` in the Android app. Android creates a
+local Wi-Fi network without a tethering upstream, and the app exposes its own
+internet proxy on the dynamic target shown in the summary. Multiple clients
+can join that SSID and use the same proxy while USB remains active. The host
+must keep this Wi-Fi profile local-only, with no default gateway or DNS, because
+joining the SSID by itself does not route internet traffic through the phone.
+
+With an authorized ADB connection, Linux can read the active reservation and
+update a dedicated local-only NetworkManager profile without displaying or
+copying the generated password:
+
+```bash
+./tools/pdalink.sh wifi local-hotspot sync --mode auto --start-android --connect
+```
+
+`auto` accepts each credential rotation and updates `pdalink-local-hotspot`.
+`pinned` accepts the first observed credentials, stores only their hash in a
+user-private file, and refuses to overwrite the profile after a rotation:
+
+```bash
+./tools/pdalink.sh wifi local-hotspot sync --mode pinned --connect
+./tools/pdalink.sh wifi local-hotspot sync --mode pinned --reset-pin --connect
+```
+
+The Android public Local-Only Hotspot API still chooses the SSID and password,
+so `pinned` is a host-side change guard, not a way to force a fixed AP password.
+PdaLink keeps one reservation alive and does not recreate it after a service
+restart or status refresh. Its credentials remain stable for that reservation.
+Stopping the hotspot releases Android's temporary, non-persisted configuration;
+the next explicit start on Android 15 should be treated as a credential rotation.
+Enable background profile refresh after trusted USB setup with
+`./tools/pdalink.sh config set local_hotspot_credentials auto` (or `pinned`).
+The watcher refreshes the profile only; it does not switch the active Wi-Fi
+connection automatically.
+
 `wifi connect` marks the NetworkManager profile as local-only
 (`never-default`, ignored auto DNS, IPv6 ignored, no autoconnect) so an active
 USB tether or normal internet connection keeps the default route. Ubuntu may
@@ -126,9 +162,10 @@ probably stale. Start Wi-Fi Direct again on Android, copy the current password
 shown in the app, and rerun `./tools/pdalink.sh wifi connect --password '...'`;
 the wrapper updates the saved NetworkManager secret before reconnecting.
 
-The cross-platform host contract and the planned Windows/macOS native helpers
-are tracked in `docs/HOST_AUTOMATION_PLAN.md`. Until their real-host smoke tests
-pass, Windows and macOS Wi-Fi Direct proxy setup remains manual.
+The cross-platform host contract and native helper status are tracked in
+`docs/HOST_AUTOMATION_PLAN.md`. Windows proxy and experimental Wintun helpers
+now exist, but remain marked unverified until their Windows 10/11 real-host
+smoke tests pass. macOS Wi-Fi Direct proxy setup remains manual.
 
 For a USB-debugging-only prototype path, forward the Android proxy to localhost
 and curl through USB:
@@ -193,8 +230,44 @@ powershell -ExecutionPolicy Bypass -File .\tools\windows_usb_internet.ps1 stop
 This backs up the current WinINET user proxy settings, points HTTP/HTTPS proxy
 resolution at `127.0.0.1:18080`, verifies a system-proxy request, and restores
 the previous settings on stop. It is the usable Windows USB internet mode for
-proxy-aware applications; raw socket full-tunnel behavior still needs the
-planned Windows TUN/virtual-adapter slice.
+proxy-aware applications.
+
+Windows Wi-Fi Direct has two native client stages. Stage 1 joins the Android
+`DIRECT-*` group, verifies the exact PAC before mutation, applies it to the
+current user's WinINET settings, and restores the typed registry snapshot on
+stop. The password is prompted as a `SecureString`; it is present only in the
+temporary escaped WLAN XML and the Windows credential store.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\windows_wifi_direct_internet.ps1 start `
+  -Ssid 'DIRECT-...'
+powershell -ExecutionPolicy Bypass -File .\tools\windows_wifi_direct_internet.ps1 status
+powershell -ExecutionPolicy Bypass -File .\tools\windows_wifi_direct_internet.ps1 test
+powershell -ExecutionPolicy Bypass -File .\tools\windows_wifi_direct_internet.ps1 stop
+```
+
+Stage 2 is an experimental IPv4 system tunnel. From an elevated PowerShell
+window, install the pinned official signed Wintun 0.14.1 DLL once, then start
+the client. It preserves a `/32` route to `192.168.49.1`, creates two owned
+split-default IPv4 routes through Wintun, and configures DNS only on that owned
+adapter. `stop` removes those exact values in reverse order.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\windows_wifi_direct_tunnel.ps1 setup
+powershell -ExecutionPolicy Bypass -File .\tools\windows_wifi_direct_tunnel.ps1 start `
+  -Ssid 'DIRECT-...'
+powershell -ExecutionPolicy Bypass -File .\tools\windows_wifi_direct_tunnel.ps1 status
+powershell -ExecutionPolicy Bypass -File .\tools\windows_wifi_direct_tunnel.ps1 test
+powershell -ExecutionPolicy Bypass -File .\tools\windows_wifi_direct_tunnel.ps1 stop
+```
+
+The tunnel requires native-architecture Python 3.10+ and supports the same
+prototype packet set as Linux: IPv4 TCP plus UDP/53 DNS. IPv6, ICMP, arbitrary
+UDP, and QUIC are not carried. The hand-built TCP state machine is diagnostic
+rather than product-grade. The scripts and packet backend pass local static/unit checks,
+but driver install, WLAN, WinINET, route, DNS, sleep/resume, and cleanup still
+require the documented Windows 10/11 smoke before either Windows stage is
+called verified.
 
 For WSL 2 system-routing tests on a Windows host, keep the ADB forward on
 Windows localhost and expose it to WSL through a temporary user-mode relay:

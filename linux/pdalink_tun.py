@@ -7,7 +7,6 @@ TCP streams and UDP/53 DNS queries. Other protocols are ignored.
 
 from __future__ import annotations
 
-import fcntl
 import os
 import random
 import select
@@ -18,6 +17,11 @@ import time
 from collections import Counter
 from dataclasses import dataclass
 from urllib.parse import urlparse
+
+try:
+    import fcntl
+except ImportError:  # Windows imports the packet engine but supplies Wintun I/O.
+    fcntl = None
 
 
 IFF_TUN = 0x0001
@@ -258,6 +262,8 @@ class TunHttpAdapter:
         tcp_idle_timeout: float = TCP_IDLE_TIMEOUT,
         verbose: bool = False,
     ) -> "TunHttpAdapter":
+        if fcntl is None:
+            raise OSError("Linux TUN open requires the fcntl module")
         tun_fd = os.open("/dev/net/tun", os.O_RDWR)
         ifr = struct.pack("16sH", iface.encode("ascii")[:15], IFF_TUN | IFF_NO_PI)
         result = fcntl.ioctl(tun_fd, TUNSETIFF, ifr)

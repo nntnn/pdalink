@@ -1,6 +1,7 @@
 import unittest
 
 import argparse
+import base64
 import io
 import json
 import os
@@ -25,6 +26,101 @@ import pdalink_tun
 
 
 class LinuxCliTest(unittest.TestCase):
+    def local_hotspot_broadcast(self, **overrides):
+        payload = {
+            "ssid": "AndroidShare_1234",
+            "password": "generated-secret",
+            "interface": "swlan0",
+            "host": "10.111.107.245",
+            "port": 8001,
+            "security": "WPA2/WPA3 transition",
+        }
+        payload.update(overrides)
+        encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+        return f'Broadcast completed: result=-1, data="{encoded}"\n'
+
+    def test_parse_local_hotspot_broadcast_decodes_valid_snapshot(self):
+        credentials = pdalink_lite.parse_local_hotspot_broadcast(self.local_hotspot_broadcast())
+
+        self.assertEqual(credentials.ssid, "AndroidShare_1234")
+        self.assertEqual(credentials.password, "generated-secret")
+        self.assertEqual(credentials.host, "10.111.107.245")
+        self.assertEqual(credentials.port, 8001)
+
+    def test_parse_local_hotspot_broadcast_rejects_untrusted_endpoint(self):
+        with self.assertRaisesRegex(ValueError, "private IPv4"):
+            pdalink_lite.parse_local_hotspot_broadcast(
+                self.local_hotspot_broadcast(host="8.8.8.8")
+            )
+
+    def test_auto_local_hotspot_sync_updates_profile_without_pin(self):
+        credentials = pdalink_lite.parse_local_hotspot_broadcast(self.local_hotspot_broadcast())
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(pdalink_lite, "prepare_local_hotspot_profile", return_value="pdalink-local-hotspot") as prepare:
+            ok, status = pdalink_lite.apply_local_hotspot_credentials(
+                credentials,
+                mode="auto",
+                profile_name="pdalink-local-hotspot",
+                pin_path=Path(tmp) / "pin.json",
+                iface="wlp1s0",
+            )
+
+            self.assertTrue(ok)
+            self.assertEqual(status, "updated")
+            self.assertFalse((Path(tmp) / "pin.json").exists())
+            prepare.assert_called_once_with(credentials, "pdalink-local-hotspot", "wlp1s0")
+
+    def test_pinned_local_hotspot_sync_hashes_password_and_refuses_rotation(self):
+        credentials = pdalink_lite.parse_local_hotspot_broadcast(self.local_hotspot_broadcast())
+        rotated = pdalink_lite.parse_local_hotspot_broadcast(
+            self.local_hotspot_broadcast(password="rotated-secret")
+        )
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(pdalink_lite, "prepare_local_hotspot_profile", return_value="pdalink-local-hotspot") as prepare:
+            pin_path = Path(tmp) / "pin.json"
+            ok, status = pdalink_lite.apply_local_hotspot_credentials(
+                credentials,
+                mode="pinned",
+                profile_name="pdalink-local-hotspot",
+                pin_path=pin_path,
+                iface=None,
+            )
+            self.assertTrue(ok)
+            self.assertEqual(status, "pinned")
+            pin = json.loads(pin_path.read_text())
+            self.assertNotIn("password", pin)
+            self.assertIn("password_sha256", pin)
+            self.assertEqual(pin_path.stat().st_mode & 0o777, 0o600)
+
+            prepare.reset_mock()
+            ok, status = pdalink_lite.apply_local_hotspot_credentials(
+                rotated,
+                mode="pinned",
+                profile_name="pdalink-local-hotspot",
+                pin_path=pin_path,
+                iface=None,
+            )
+            self.assertFalse(ok)
+            self.assertEqual(status, "credential-mismatch")
+            prepare.assert_not_called()
+
+    def test_pinned_local_hotspot_sync_rejects_filesystem_without_private_modes(self):
+        credentials = pdalink_lite.parse_local_hotspot_broadcast(self.local_hotspot_broadcast())
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(pdalink_lite, "prepare_local_hotspot_profile", return_value="pdalink-local-hotspot"), \
+                mock.patch.object(pdalink_lite, "local_hotspot_pin_mode", return_value=0o755):
+            pin_path = Path(tmp) / "pin.json"
+            with self.assertRaisesRegex(ValueError, "mode 0600"):
+                pdalink_lite.apply_local_hotspot_credentials(
+                    credentials,
+                    mode="pinned",
+                    profile_name="pdalink-local-hotspot",
+                    pin_path=pin_path,
+                    iface=None,
+                )
+
+            self.assertFalse(pin_path.exists())
+
     def test_parse_ports_default(self):
         self.assertEqual(pdalink_lite.parse_ports(None), (8000, 8001))
 

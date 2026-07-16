@@ -11,8 +11,9 @@ This does not turn Wi-Fi Direct into Android tethering. TV, IoT, and other
 hosts without a PdaLink helper still need a manual proxy configuration.
 
 Current delivery status: the Linux NetworkManager + GNOME slice is implemented
-and live-tested. Windows and macOS remain follow-up slices until each can pass
-the required smoke test on its native host.
+and live-tested. The Windows PAC lifecycle and experimental Wintun IPv4 tunnel
+are implemented with local static/unit coverage but are not marked verified
+until Windows 10/11 real-host smoke passes. macOS remains a follow-up slice.
 
 ## Common Host Contract
 
@@ -77,15 +78,45 @@ Acceptance:
 
 ### 2. Windows 10/11
 
-Add `tools/windows_wifi_direct_internet.ps1` with
-`start|status|test|stop`. Use a temporary escaped WLAN profile for `netsh wlan`
-and delete the plaintext temporary file immediately. Reuse the proven WinINET
-snapshot, notification, and rollback behavior from
-`windows_usb_internet.ps1`; use the Direct PAC instead of an ADB forward.
+Stage 1 is implemented by `tools/windows_wifi_direct_internet.ps1` with
+`start|status|test|stop`. It creates a GUID-owned manual WPA2 WLAN profile from
+an `XmlWriter` document, accepts the password only as a `SecureString`, deletes
+the plaintext temporary XML in `finally`, and verifies the selected
+`192.168.49.x` route plus exact PAC before writing WinINET. State under the
+current user's local application data stores typed before/applied registry
+snapshots but no credential. Failed start rolls back, and normal stop refuses
+proxy drift.
 
-Acceptance additionally requires a real Windows host smoke because PowerShell,
-WLAN profile import, and WinINET notifications cannot be executed in the
-current Linux environment.
+Stage 2 is implemented by `tools/windows_wifi_direct_tunnel.ps1` and
+`windows/pdalink_wintun.py`. The elevated `setup` action downloads only the
+official signed Wintun 0.14.1 ZIP, verifies pinned archive SHA-256
+`07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51`, and
+installs the architecture-specific DLL under an admin-only ProgramData
+directory. Setup rejects unsafe owners/reparse points and runtime re-verifies
+the DLL hash, WireGuard Authenticode signer, and native Python architecture.
+Start then:
+
+```text
+join and verify Direct PAC
+  -> refuse foreign /1 routes
+  -> start verified Wintun process
+  -> write recovery state
+  -> pin 192.168.49.1/32 to Wi-Fi
+  -> add 0.0.0.0/1 and 128.0.0.0/1 to Wintun
+  -> set DNS only on Wintun
+  -> activate adapter and run no-proxy IPv4/DNS smoke
+```
+
+The Wintun process reuses the Linux HTTP `CONNECT` packet engine. This is an
+experimental IPv4 TCP plus UDP/53 path, not a product full tunnel: IPv6, ICMP,
+arbitrary UDP/QUIC, and mature long-lived TCP semantics remain outside its
+claim. A later WFP ALE redirector is the preferred Windows product-direction
+investigation because it can preserve kernel TCP semantics.
+
+Acceptance additionally requires real Windows 10 and Windows 11 host smoke.
+PowerShell 5.1 WLAN/WinINET behavior, Wintun driver install/UAC, route and DNS
+selection, suspend/resume, forced-process recovery, and exact cleanup cannot be
+executed in the current Linux environment.
 
 ### 3. macOS
 
@@ -108,8 +139,9 @@ python3 -m unittest discover -s tests
 ```
 
 Windows/macOS scripts receive static contract tests in this repository plus a
-documented real-host smoke. A platform is not marked verified until that smoke
-has been run on the platform.
+documented real-host smoke. The Windows Wintun backend additionally receives
+fake-session lifecycle tests and reuses the existing TCP/DNS packet tests. A
+platform is not marked verified until its native smoke has been run.
 
 Review focuses on secret handling, transactional restore behavior, proxy drift,
 route preservation, command quoting, and idempotent start/stop cycles. Runtime
@@ -119,7 +151,10 @@ no background polling is added.
 ## Delivery Order
 
 1. Deliver and live-test the Linux vertical slice.
-2. Extract/reuse Windows proxy-state behavior and verify on Windows 10/11.
-3. Deliver the macOS `networksetup` slice and verify on a current macOS host.
-4. Add credential handoff improvements such as copy buttons or QR guidance
+2. Verify the implemented Windows PAC and experimental Wintun stages on both
+   Windows 10 and Windows 11; keep them unverified until exact restore passes.
+3. Replace the diagnostic TCP engine with a mature netstack or WFP redirector
+   before making a product full-tunnel claim.
+4. Deliver the macOS `networksetup` slice and verify on a current macOS host.
+5. Add credential handoff improvements such as copy buttons or QR guidance
    only after all three lifecycle implementations restore settings reliably.

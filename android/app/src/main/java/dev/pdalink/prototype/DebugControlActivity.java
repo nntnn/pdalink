@@ -36,9 +36,13 @@ public class DebugControlActivity extends Activity {
         }
         if (ProxyActions.ACTION_START.equals(action)
                 || ProxyActions.ACTION_START_USB.equals(action)
+                || ProxyActions.ACTION_STOP_USB.equals(action)
                 || ProxyActions.ACTION_START_PRODUCT_USB.equals(action)
                 || ProxyActions.ACTION_START_WIFI_DIRECT.equals(action)
-                || ProxyActions.ACTION_STOP_WIFI_DIRECT.equals(action)) {
+                || ProxyActions.ACTION_STOP_WIFI_DIRECT.equals(action)
+                || ProxyActions.ACTION_START_LOCAL_HOTSPOT.equals(action)
+                || ProxyActions.ACTION_STOP_LOCAL_HOTSPOT.equals(action)
+                || ProxyActions.ACTION_STOP_WIFI.equals(action)) {
             return action;
         }
         return ProxyActions.ACTION_START_USB;

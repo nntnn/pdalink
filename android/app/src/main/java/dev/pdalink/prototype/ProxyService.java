@@ -1,5 +1,6 @@
 package dev.pdalink.prototype;
 
+import android.annotation.TargetApi;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -11,6 +12,9 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
+import android.net.wifi.SoftApConfiguration;
+import android.net.wifi.WifiConfiguration;
+import android.net.wifi.WifiManager;
 import android.net.wifi.p2p.WifiP2pConfig;
 import android.net.wifi.p2p.WifiP2pGroup;
 import android.net.wifi.p2p.WifiP2pManager;
@@ -20,6 +24,9 @@ import android.os.IBinder;
 import android.util.Log;
 
 import java.security.SecureRandom;
+import java.net.SocketException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 
 public class ProxyService extends Service {
@@ -29,15 +36,17 @@ public class ProxyService extends Service {
     private static final String PREFS_NAME = "pdalink_proxy";
     private static final String PREF_MODE = "mode";
     private static final String PREF_WIFI_DIRECT_ENABLED = "wifi_direct_enabled";
+    private static final String PREF_LOCAL_HOTSPOT_ENABLED = "local_hotspot_enabled";
     private static final String PREF_WIFI_DIRECT_SSID = "wifi_direct_ssid";
     private static final String PREF_WIFI_DIRECT_PASSPHRASE = "wifi_direct_passphrase";
-    private static final String WIFI_HOST = "192.168.49.1";
+    private static final String PREF_WIFI_DIRECT_LEGACY_OWNED_SSID = "wifi_direct_legacy_owned_ssid";
+    private static final String WIFI_DIRECT_HOST = "192.168.49.1";
     private static final String WIFI_DIRECT_CLIENT_PREFIX = "192.168.49.";
     private static final String USB_HOST = "127.0.0.1";
     private static final int[] USB_PROXY_CANDIDATE_PORTS = new int[]{8000};
     private static final int[] WIFI_PROXY_CANDIDATE_PORTS = new int[]{8001};
 
-    private enum Mode {USB, PRODUCT_USB, WIFI_DIRECT}
+    private enum Mode {USB, PRODUCT_USB, WIFI_DIRECT, LOCAL_HOTSPOT}
 
     private volatile HttpProxyServer usbProxyServer;
     private volatile HttpProxyServer wifiProxyServer;
@@ -45,15 +54,28 @@ public class ProxyService extends Service {
     private WifiP2pManager wifiP2pManager;
     private WifiP2pManager.Channel wifiP2pChannel;
     private BroadcastReceiver p2pReceiver;
+    private WifiManager.LocalOnlyHotspotReservation localHotspotReservation;
     private Handler mainHandler;
     private ProductUsbBridge productUsbBridge;
     private Mode currentMode = Mode.USB;
     private boolean wifiDirectEnabled;
+    private boolean localHotspotEnabled;
+    private boolean localHotspotStartAuthorized;
+    private boolean localHotspotStartPending;
+    private boolean localHotspotPreparationPending;
+    private String wifiProxyHost = WIFI_DIRECT_HOST;
+    private String wifiClientPrefix = WIFI_DIRECT_CLIENT_PREFIX;
+    private List<LocalHotspotAddressSelector.InterfaceAddress> localHotspotBaseline = new ArrayList<>();
+    private int localHotspotGeneration;
     private String groupSsid = "";
     private String groupPassphrase = "";
     private String groupInterface = "";
+    private String wifiSecurity = "";
     private String requestedWifiBand = WifiDirectBand.AUTO;
     private int groupFrequencyMhz;
+    private int wifiGroupClientCount;
+    private boolean wifiGroupOwned;
+    private boolean wifiGroupCreationAccepted;
     private boolean wifiGroupOperationInProgress;
     private String lastRequest = "";
     private String lastError = "";
@@ -67,13 +89,23 @@ public class ProxyService extends Service {
         mainHandler = new Handler(getMainLooper());
         requestedWifiBand = WifiDirectBand.load(this);
         Mode savedMode = loadSavedMode();
-        if (savedMode == Mode.WIFI_DIRECT) {
+        if (savedMode == Mode.WIFI_DIRECT || savedMode == Mode.LOCAL_HOTSPOT) {
             currentMode = Mode.USB;
-            setWifiDirectEnabled(true);
+            if (savedMode == Mode.WIFI_DIRECT) {
+                setWifiDirectEnabled(true);
+            }
             saveMode(Mode.USB);
         } else {
             currentMode = savedMode;
             wifiDirectEnabled = loadWifiDirectEnabled();
+        }
+        localHotspotEnabled = false;
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .edit()
+                .remove(PREF_LOCAL_HOTSPOT_ENABLED)
+                .apply();
+        if (wifiDirectEnabled && localHotspotEnabled) {
+            setWifiDirectEnabled(false);
         }
         networkSelector = new NetworkSelector(this, this::status);
         networkSelector.start();
@@ -88,17 +120,75 @@ public class ProxyService extends Service {
                     this,
                     intent.getStringExtra(ProxyActions.EXTRA_WIFI_BAND));
         }
+        if (ProxyActions.ACTION_START_WIFI_DIRECT.equals(action)) {
+            boolean switching = localHotspotEnabled || localHotspotReservation != null;
+            stopLocalHotspot();
+            setWifiDirectEnabled(true);
+            ensureUsbProxyServer();
+            Runnable start = () -> {
+                if (!wifiDirectEnabled) {
+                    return;
+                }
+                setupWifiP2p();
+                createGroup();
+            };
+            if (switching) {
+                mainHandler.postDelayed(start, 1000);
+            } else {
+                start.run();
+            }
+            status("Transports " + modeLabel() + " active");
+            return START_STICKY;
+        }
+        if (ProxyActions.ACTION_START_LOCAL_HOTSPOT.equals(action)) {
+            if (Build.VERSION.SDK_INT < 26) {
+                status("Local Hotspot requires Android 8.0 or later");
+                return START_STICKY;
+            }
+            localHotspotStartAuthorized = true;
+            setLocalHotspotEnabled(true);
+            ensureUsbProxyServer();
+            prepareLocalHotspot();
+            status("Transports " + modeLabel() + " active");
+            return START_STICKY;
+        }
+        if (ProxyActions.ACTION_STOP_USB.equals(action)) {
+            closeUsbProxyServer();
+            closeProductUsbBridge(true);
+            if (!wifiDirectEnabled && !localHotspotEnabled) {
+                status("Stopping USB proxy service");
+                stopSelf();
+                return START_NOT_STICKY;
+            }
+            status("USB proxy stopped; " + wifiTransportLabel() + " remains active");
+            updateNotification();
+            return START_STICKY;
+        }
         if (ProxyActions.ACTION_STOP.equals(action)) {
             setWifiDirectEnabled(false);
+            setLocalHotspotEnabled(false);
             status("Stopping service");
             stopSelf();
             return START_NOT_STICKY;
+        }
+        if (ProxyActions.ACTION_STOP_WIFI.equals(action)) {
+            ensureUsbProxyServer();
+            stopWifiDirect();
+            stopLocalHotspot();
+            status("Wi-Fi stopped; USB proxy remains active");
+            return START_STICKY;
         }
         if (ProxyActions.ACTION_STOP_WIFI_DIRECT.equals(action)) {
             ensureUsbProxyServer();
             stopWifiDirect();
             status("Wi-Fi Direct stopped; USB proxy remains active");
             updateNotification();
+            return START_STICKY;
+        }
+        if (ProxyActions.ACTION_STOP_LOCAL_HOTSPOT.equals(action)) {
+            ensureUsbProxyServer();
+            stopLocalHotspot();
+            status("Local Hotspot stopped; USB proxy remains active");
             return START_STICKY;
         }
 
@@ -108,8 +198,14 @@ public class ProxyService extends Service {
             if (wifiDirectEnabled) {
                 setupWifiP2p();
                 requestGroupInfo();
+            } else if (localHotspotEnabled) {
+                if (localHotspotReservation != null) {
+                    scheduleLocalHotspotAddressDiscovery(localHotspotGeneration, 0);
+                } else {
+                    status("Local Hotspot is not active; start it explicitly to create a new reservation");
+                }
             } else {
-                status("Wi-Fi Direct not active");
+                status("Wi-Fi transport not active");
             }
             status("Proxies: " + proxySummary());
             updateNotification();
@@ -119,9 +215,7 @@ public class ProxyService extends Service {
             requestedMode = currentMode == null ? loadSavedMode() : currentMode;
         }
 
-        if (requestedMode == Mode.WIFI_DIRECT) {
-            setWifiDirectEnabled(true);
-        } else {
+        if (requestedMode != Mode.WIFI_DIRECT && requestedMode != Mode.LOCAL_HOTSPOT) {
             setPrimaryMode(requestedMode);
         }
 
@@ -129,6 +223,8 @@ public class ProxyService extends Service {
         if (wifiDirectEnabled) {
             setupWifiP2p();
             createGroup();
+        } else if (localHotspotEnabled && localHotspotReservation != null) {
+            scheduleLocalHotspotAddressDiscovery(localHotspotGeneration, 0);
         }
         if (currentMode == Mode.PRODUCT_USB) {
             productUsbStatus = "permission granted; opening bridge";
@@ -143,12 +239,14 @@ public class ProxyService extends Service {
 
     @Override
     public void onDestroy() {
+        LocalHotspotDebugState.clear();
         if (mainHandler != null) {
             mainHandler.removeCallbacksAndMessages(null);
         }
         if (wifiP2pManager != null && wifiP2pChannel != null) {
             removeWifiGroupBestEffort();
         }
+        closeLocalHotspotReservation();
         clearWifiReceiver();
         closeWifiProxyServer();
         closeUsbProxyServer();
@@ -191,7 +289,10 @@ public class ProxyService extends Service {
     }
 
     private void ensureWifiProxyServer() {
-        if (!wifiDirectEnabled || groupSsid.isEmpty()) {
+        if ((!wifiDirectEnabled && !localHotspotEnabled)
+                || groupSsid.isEmpty()
+                || wifiProxyHost.isEmpty()
+                || wifiClientPrefix.isEmpty()) {
             return;
         }
         if (wifiProxyServer != null && wifiProxyServer.isRunning()) {
@@ -200,14 +301,14 @@ public class ProxyService extends Service {
         closeWifiProxyServer();
         wifiProxyServer = new HttpProxyServer(
                 this,
-                WIFI_HOST,
-                WIFI_DIRECT_CLIENT_PREFIX,
+                wifiProxyHost,
+                wifiClientPrefix,
                 WIFI_PROXY_CANDIDATE_PORTS,
                 host -> networkSelector.openSocket(host.host, host.port),
                 this::status);
         wifiProxyServer.start();
         clearProxyStartupError(wifiProxyServer);
-        status("Wi-Fi Direct proxy: " + wifiProxySummary());
+        status(wifiTransportLabel() + " proxy: " + wifiProxySummary());
     }
 
     private void closeUsbProxyServer() {
@@ -227,7 +328,7 @@ public class ProxyService extends Service {
     }
 
     private void setupWifiP2p() {
-        if (!wifiDirectEnabled) {
+        if (!wifiDirectEnabled && !localHotspotEnabled) {
             return;
         }
         if (wifiP2pManager != null && wifiP2pChannel != null && p2pReceiver != null) {
@@ -274,9 +375,11 @@ public class ProxyService extends Service {
     }
 
     private void removeWifiGroupBestEffort() {
-        if (wifiP2pManager == null || wifiP2pChannel == null) {
+        if (!wifiGroupOwned || wifiP2pManager == null || wifiP2pChannel == null) {
             return;
         }
+        wifiGroupOwned = false;
+        wifiGroupCreationAccepted = false;
         try {
             wifiP2pManager.removeGroup(wifiP2pChannel, new SimpleActionListener("removeGroup"));
         } catch (RuntimeException ignored) {
@@ -288,9 +391,331 @@ public class ProxyService extends Service {
         setWifiDirectEnabled(false);
         wifiGroupOperationInProgress = false;
         removeWifiGroupBestEffort();
+        wifiGroupOwned = false;
+        wifiGroupCreationAccepted = false;
         clearWifiReceiver();
         closeWifiProxyServer();
         clearGroupInfo();
+        wifiProxyHost = WIFI_DIRECT_HOST;
+        wifiClientPrefix = WIFI_DIRECT_CLIENT_PREFIX;
+    }
+
+    private void prepareLocalHotspot() {
+        if (!localHotspotEnabled
+                || !localHotspotStartAuthorized
+                || localHotspotPreparationPending
+                || localHotspotStartPending
+                || localHotspotReservation != null) {
+            return;
+        }
+        localHotspotPreparationPending = true;
+        setupWifiP2p();
+        if (wifiP2pManager == null || wifiP2pChannel == null) {
+            localHotspotPreparationPending = false;
+            startLocalHotspot();
+            return;
+        }
+        try {
+            wifiP2pManager.requestGroupInfo(wifiP2pChannel, group -> {
+                if (!localHotspotEnabled) {
+                    localHotspotPreparationPending = false;
+                    return;
+                }
+                if (group == null) {
+                    finishWifiDirectCleanupForLocalHotspot();
+                    return;
+                }
+                if (!isOwnedWifiGroup(group)) {
+                    localHotspotPreparationPending = false;
+                    setLocalHotspotEnabled(false);
+                    rejectUnownedWifiGroup();
+                    status("Local Hotspot blocked by a Wi-Fi Direct group not owned by PdaLink");
+                    return;
+                }
+                acceptOwnedWifiGroup(group);
+                removeOwnedWifiGroupForLocalHotspot();
+            });
+        } catch (SecurityException ex) {
+            localHotspotPreparationPending = false;
+            setLocalHotspotEnabled(false);
+            status("Cannot inspect Wi-Fi Direct before Local Hotspot; permission missing");
+        } catch (RuntimeException ex) {
+            localHotspotPreparationPending = false;
+            setLocalHotspotEnabled(false);
+            status("Cannot inspect Wi-Fi Direct before Local Hotspot: " + ex.getMessage());
+        }
+    }
+
+    private void removeOwnedWifiGroupForLocalHotspot() {
+        try {
+            wifiP2pManager.removeGroup(wifiP2pChannel, new WifiP2pManager.ActionListener() {
+                @Override
+                public void onSuccess() {
+                    status("Owned Wi-Fi Direct group removed for Local Hotspot");
+                    finishWifiDirectCleanupForLocalHotspot();
+                }
+
+                @Override
+                public void onFailure(int reason) {
+                    localHotspotPreparationPending = false;
+                    setLocalHotspotEnabled(false);
+                    status("Cannot remove owned Wi-Fi Direct group for Local Hotspot: "
+                            + p2pReason(reason));
+                }
+            });
+        } catch (SecurityException ex) {
+            localHotspotPreparationPending = false;
+            setLocalHotspotEnabled(false);
+            status("Cannot remove owned Wi-Fi Direct group; permission missing");
+        } catch (RuntimeException ex) {
+            localHotspotPreparationPending = false;
+            setLocalHotspotEnabled(false);
+            status("Cannot remove owned Wi-Fi Direct group: " + ex.getMessage());
+        }
+    }
+
+    private void finishWifiDirectCleanupForLocalHotspot() {
+        setWifiDirectEnabled(false);
+        wifiGroupOperationInProgress = false;
+        wifiGroupOwned = false;
+        wifiGroupCreationAccepted = false;
+        clearWifiReceiver();
+        closeWifiProxyServer();
+        clearGroupInfo();
+        wifiProxyHost = "";
+        wifiClientPrefix = "";
+        localHotspotPreparationPending = false;
+        mainHandler.postDelayed(this::startLocalHotspot, 500);
+    }
+
+    @TargetApi(26)
+    private void startLocalHotspot() {
+        if (!localHotspotEnabled
+                || !localHotspotStartAuthorized
+                || localHotspotStartPending
+                || localHotspotReservation != null) {
+            return;
+        }
+        WifiManager wifiManager = (WifiManager) getApplicationContext()
+                .getSystemService(Context.WIFI_SERVICE);
+        if (wifiManager == null) {
+            setLocalHotspotEnabled(false);
+            status("Local Hotspot unavailable on this device");
+            return;
+        }
+        localHotspotBaseline = snapshotLocalAddresses();
+        LocalHotspotDebugState.clear();
+        wifiProxyHost = "";
+        wifiClientPrefix = "";
+        closeWifiProxyServer();
+        clearGroupInfo();
+        int generation = ++localHotspotGeneration;
+        localHotspotStartPending = true;
+        try {
+            wifiManager.startLocalOnlyHotspot(new WifiManager.LocalOnlyHotspotCallback() {
+                @Override
+                public void onStarted(WifiManager.LocalOnlyHotspotReservation reservation) {
+                    if (!localHotspotEnabled || generation != localHotspotGeneration) {
+                        reservation.close();
+                        return;
+                    }
+                    localHotspotStartPending = false;
+                    localHotspotStartAuthorized = false;
+                    localHotspotReservation = reservation;
+                    publishLocalHotspotConfiguration(reservation);
+                    scheduleLocalHotspotAddressDiscovery(generation, 0);
+                }
+
+                @Override
+                public void onStopped() {
+                    if (generation != localHotspotGeneration) {
+                        return;
+                    }
+                    localHotspotStartPending = false;
+                    localHotspotStartAuthorized = false;
+                    localHotspotReservation = null;
+                    LocalHotspotDebugState.clear();
+                    setLocalHotspotEnabled(false);
+                    closeWifiProxyServer();
+                    clearGroupInfo();
+                    wifiProxyHost = "";
+                    wifiClientPrefix = "";
+                    status("Local Hotspot stopped by Android");
+                }
+
+                @Override
+                public void onFailed(int reason) {
+                    if (generation != localHotspotGeneration) {
+                        return;
+                    }
+                    localHotspotStartPending = false;
+                    localHotspotStartAuthorized = false;
+                    localHotspotReservation = null;
+                    LocalHotspotDebugState.clear();
+                    setLocalHotspotEnabled(false);
+                    closeWifiProxyServer();
+                    clearGroupInfo();
+                    status("Local Hotspot failed: reason " + reason);
+                }
+            }, mainHandler);
+            status("Local Hotspot start requested");
+        } catch (SecurityException ex) {
+            localHotspotStartPending = false;
+            localHotspotStartAuthorized = false;
+            LocalHotspotDebugState.clear();
+            setLocalHotspotEnabled(false);
+            status("Cannot start Local Hotspot; permission missing");
+        } catch (RuntimeException ex) {
+            localHotspotStartPending = false;
+            localHotspotStartAuthorized = false;
+            LocalHotspotDebugState.clear();
+            setLocalHotspotEnabled(false);
+            status("Local Hotspot start failed: " + ex.getMessage());
+        }
+    }
+
+    @TargetApi(26)
+    private void publishLocalHotspotConfiguration(
+            WifiManager.LocalOnlyHotspotReservation reservation) {
+        if (Build.VERSION.SDK_INT >= 30) {
+            SoftApConfiguration configuration = reservation.getSoftApConfiguration();
+            groupSsid = valueOrEmpty(configuration.getSsid());
+            groupPassphrase = valueOrEmpty(configuration.getPassphrase());
+            wifiSecurity = softApSecurityLabel(configuration.getSecurityType());
+        } else {
+            WifiConfiguration configuration = reservation.getWifiConfiguration();
+            groupSsid = unquoteWifiValue(configuration == null ? null : configuration.SSID);
+            groupPassphrase = unquoteWifiValue(
+                    configuration == null ? null : configuration.preSharedKey);
+            wifiSecurity = "WPA2-PSK";
+        }
+        groupInterface = "discovering";
+        groupFrequencyMhz = 0;
+        wifiGroupClientCount = -1;
+        wifiGroupOwned = false;
+        status("Local Hotspot SSID: " + groupSsid);
+        status("Local Hotspot password: available in app summary");
+        status("Local Hotspot security: " + wifiSecurity);
+    }
+
+    @TargetApi(30)
+    private String softApSecurityLabel(int securityType) {
+        switch (securityType) {
+            case SoftApConfiguration.SECURITY_TYPE_OPEN:
+                return "Open";
+            case SoftApConfiguration.SECURITY_TYPE_WPA2_PSK:
+                return "WPA2-PSK";
+            case SoftApConfiguration.SECURITY_TYPE_WPA3_SAE_TRANSITION:
+                return "WPA2/WPA3 transition";
+            case SoftApConfiguration.SECURITY_TYPE_WPA3_SAE:
+                return "WPA3-SAE";
+            case SoftApConfiguration.SECURITY_TYPE_WPA3_OWE_TRANSITION:
+                return "OWE transition";
+            case SoftApConfiguration.SECURITY_TYPE_WPA3_OWE:
+                return "OWE";
+            default:
+                return "type " + securityType;
+        }
+    }
+
+    private String unquoteWifiValue(String value) {
+        String normalized = valueOrEmpty(value);
+        if (normalized.length() >= 2
+                && normalized.charAt(0) == '"'
+                && normalized.charAt(normalized.length() - 1) == '"') {
+            return normalized.substring(1, normalized.length() - 1);
+        }
+        return normalized;
+    }
+
+    private void scheduleLocalHotspotAddressDiscovery(int generation, int attempt) {
+        if (!localHotspotEnabled
+                || localHotspotReservation == null
+                || generation != localHotspotGeneration) {
+            return;
+        }
+        LocalHotspotAddressSelector.InterfaceAddress selected =
+                LocalHotspotAddressSelector.select(
+                        localHotspotBaseline,
+                        snapshotLocalAddresses());
+        if (selected != null) {
+            boolean addressChanged = !selected.address.equals(wifiProxyHost);
+            groupInterface = selected.interfaceName;
+            wifiProxyHost = selected.address;
+            wifiClientPrefix = LocalHotspotAddressSelector.clientPrefix(selected.address);
+            if (addressChanged) {
+                LocalHotspotDebugState.clear();
+                closeWifiProxyServer();
+            }
+            ensureWifiProxyServer();
+            publishLocalHotspotDebugState();
+            status("Local Hotspot interface: " + groupInterface);
+            status("Local Hotspot proxy target: " + wifiTarget());
+            return;
+        }
+        if (attempt >= 40) {
+            status("Local Hotspot interface unavailable after 10 seconds");
+            return;
+        }
+        mainHandler.postDelayed(
+                () -> scheduleLocalHotspotAddressDiscovery(generation, attempt + 1),
+                250);
+    }
+
+    private List<LocalHotspotAddressSelector.InterfaceAddress> snapshotLocalAddresses() {
+        try {
+            return LocalHotspotAddressSelector.snapshot();
+        } catch (SocketException ex) {
+            status("Local Hotspot interface scan failed: " + ex.getMessage());
+            return new ArrayList<>();
+        }
+    }
+
+    private void stopLocalHotspot() {
+        LocalHotspotDebugState.clear();
+        localHotspotStartAuthorized = false;
+        setLocalHotspotEnabled(false);
+        closeLocalHotspotReservation();
+        closeWifiProxyServer();
+        clearGroupInfo();
+        wifiProxyHost = "";
+        wifiClientPrefix = "";
+    }
+
+    @TargetApi(26)
+    private void closeLocalHotspotReservation() {
+        LocalHotspotDebugState.clear();
+        localHotspotStartAuthorized = false;
+        localHotspotGeneration++;
+        localHotspotStartPending = false;
+        localHotspotPreparationPending = false;
+        WifiManager.LocalOnlyHotspotReservation reservation = localHotspotReservation;
+        localHotspotReservation = null;
+        if (reservation != null) {
+            reservation.close();
+        }
+    }
+
+    private void publishLocalHotspotDebugState() {
+        int port = wifiProxyPort();
+        if (!localHotspotEnabled
+                || localHotspotReservation == null
+                || wifiProxyServer == null
+                || !wifiProxyServer.isRunning()
+                || groupSsid.isEmpty()
+                || groupPassphrase.isEmpty()
+                || groupInterface.isEmpty()
+                || wifiProxyHost.isEmpty()
+                || port <= 0) {
+            return;
+        }
+        LocalHotspotDebugState.publish(
+                groupSsid,
+                groupPassphrase,
+                groupInterface,
+                wifiProxyHost,
+                port,
+                wifiSecurity);
     }
 
     private void startProductUsbBridge() {
@@ -337,7 +762,9 @@ public class ProxyService extends Service {
         groupSsid = "";
         groupPassphrase = "";
         groupInterface = "";
+        wifiSecurity = "";
         groupFrequencyMhz = 0;
+        wifiGroupClientCount = 0;
     }
 
     private String valueOrEmpty(String value) {
@@ -379,6 +806,7 @@ public class ProxyService extends Service {
             @Override
             public void onSuccess() {
                 wifiGroupOperationInProgress = false;
+                wifiGroupCreationAccepted = true;
                 status("createGroup accepted for " + WifiDirectBand.label(requestedWifiBand));
                 requestGroupInfo();
             }
@@ -386,6 +814,7 @@ public class ProxyService extends Service {
             @Override
             public void onFailure(int reason) {
                 wifiGroupOperationInProgress = false;
+                wifiGroupCreationAccepted = false;
                 status("createGroup rejected for " + WifiDirectBand.label(requestedWifiBand)
                         + ": " + p2pReason(reason));
                 if (retryAfterBusy && reason == WifiP2pManager.BUSY) {
@@ -395,6 +824,7 @@ public class ProxyService extends Service {
         };
         try {
             wifiGroupOperationInProgress = true;
+            wifiGroupCreationAccepted = false;
             if (WifiDirectBand.supportsSelection()) {
                 wifiP2pManager.createGroup(wifiP2pChannel, buildWifiP2pConfig(), listener);
             } else {
@@ -402,13 +832,16 @@ public class ProxyService extends Service {
             }
         } catch (SecurityException ex) {
             wifiGroupOperationInProgress = false;
+            wifiGroupCreationAccepted = false;
             status("Missing Wi-Fi Direct permission: " + ex.getMessage());
         } catch (RuntimeException ex) {
             wifiGroupOperationInProgress = false;
+            wifiGroupCreationAccepted = false;
             status("createGroup failed: " + ex.getMessage());
         }
     }
 
+    @TargetApi(29)
     private WifiP2pConfig buildWifiP2pConfig() {
         String[] credentials = loadOrCreateGroupCredentials();
         return new WifiP2pConfig.Builder()
@@ -420,7 +853,11 @@ public class ProxyService extends Service {
     }
 
     private void handleExistingGroup(WifiP2pGroup group) {
-        rememberGroupCredentials(group);
+        if (!isOwnedWifiGroup(group)) {
+            rejectUnownedWifiGroup();
+            return;
+        }
+        acceptOwnedWifiGroup(group);
         int frequencyMhz = groupFrequency(group);
         if (WifiDirectBand.matchesFrequency(requestedWifiBand, frequencyMhz)) {
             publishGroupInfo(group);
@@ -443,6 +880,9 @@ public class ProxyService extends Service {
                 @Override
                 public void onSuccess() {
                     wifiGroupOperationInProgress = false;
+                    wifiGroupOwned = false;
+                    wifiGroupCreationAccepted = false;
+                    clearGroupInfo();
                     status("Previous Wi-Fi Direct group removed for band switch");
                     createGroupInternal(false);
                 }
@@ -451,6 +891,7 @@ public class ProxyService extends Service {
                 public void onFailure(int reason) {
                     wifiGroupOperationInProgress = false;
                     status("Band switch removeGroup rejected: " + p2pReason(reason));
+                    requestGroupInfo();
                 }
             });
         } catch (SecurityException ex) {
@@ -470,43 +911,19 @@ public class ProxyService extends Service {
                     handleExistingGroup(group);
                     return;
                 }
-                removeGroupBeforeRetry();
+                retryBusyGroupWithoutRemoval();
             });
         } catch (SecurityException ex) {
             status("Cannot recover Wi-Fi Direct busy state; permission missing");
         } catch (RuntimeException ex) {
             status("requestGroupInfo after busy failed: " + ex.getMessage());
-            removeGroupBeforeRetry();
+            retryBusyGroupWithoutRemoval();
         }
     }
 
-    private void removeGroupBeforeRetry() {
-        status("Wi-Fi Direct busy; removing stale group before one retry");
-        try {
-            wifiGroupOperationInProgress = true;
-            wifiP2pManager.removeGroup(wifiP2pChannel, new SimpleActionListener("removeGroup before retry") {
-                @Override
-                public void onSuccess() {
-                    wifiGroupOperationInProgress = false;
-                    super.onSuccess();
-                    retryCreateGroupOnce();
-                }
-
-                @Override
-                public void onFailure(int reason) {
-                    wifiGroupOperationInProgress = false;
-                    status("removeGroup before retry rejected: " + p2pReason(reason));
-                    retryCreateGroupOnce();
-                }
-            });
-        } catch (SecurityException ex) {
-            wifiGroupOperationInProgress = false;
-            status("Cannot remove stale Wi-Fi Direct group; permission missing");
-        } catch (RuntimeException ex) {
-            wifiGroupOperationInProgress = false;
-            status("removeGroup before retry failed: " + ex.getMessage());
-            retryCreateGroupOnce();
-        }
+    private void retryBusyGroupWithoutRemoval() {
+        status("Wi-Fi Direct busy; leaving unowned group state untouched before one retry");
+        retryCreateGroupOnce();
     }
 
     private void retryCreateGroupOnce() {
@@ -530,26 +947,35 @@ public class ProxyService extends Service {
 
     private void publishGroupInfo(WifiP2pGroup group) {
         if (!wifiDirectEnabled) {
+            wifiGroupOwned = false;
+            wifiGroupCreationAccepted = false;
             clearGroupInfo();
             return;
         }
         if (group == null) {
             closeWifiProxyServer();
+            wifiGroupOwned = false;
+            wifiGroupCreationAccepted = false;
             clearGroupInfo();
             status("Wi-Fi Direct group not active yet");
             updateNotification();
             return;
         }
+        if (!isOwnedWifiGroup(group)) {
+            rejectUnownedWifiGroup();
+            return;
+        }
+        acceptOwnedWifiGroup(group);
         groupSsid = valueOrEmpty(group.getNetworkName());
         groupPassphrase = valueOrEmpty(group.getPassphrase());
         groupInterface = valueOrEmpty(group.getInterface());
+        wifiSecurity = "WPA2-PSK";
         groupFrequencyMhz = groupFrequency(group);
         if (groupSsid.isEmpty()) {
             closeWifiProxyServer();
             status("Wi-Fi Direct group missing network name");
             return;
         }
-        rememberGroupCredentials(group);
         if (!WifiDirectBand.matchesFrequency(requestedWifiBand, groupFrequencyMhz)) {
             closeWifiProxyServer();
             status("Wi-Fi Direct group used " + WifiDirectBand.frequencyLabel(groupFrequencyMhz)
@@ -561,7 +987,8 @@ public class ProxyService extends Service {
         status("Group password: available in app summary");
         status("Group interface: " + groupInterface);
         status("Group band: " + WifiDirectBand.frequencyLabel(groupFrequencyMhz)
-                + " (requested " + WifiDirectBand.label(requestedWifiBand) + ")");
+                + " (requested " + WifiDirectBand.label(requestedWifiBand) + ")"
+                + "; clients " + wifiGroupClientCount);
         status("Wi-Fi Direct proxy target: " + wifiTarget());
         updateNotification();
     }
@@ -570,16 +997,55 @@ public class ProxyService extends Service {
         return Build.VERSION.SDK_INT >= 29 ? group.getFrequency() : 0;
     }
 
-    private void rememberGroupCredentials(WifiP2pGroup group) {
-        String ssid = valueOrEmpty(group.getNetworkName());
-        String passphrase = valueOrEmpty(group.getPassphrase());
-        if (!validGroupCredentials(ssid, passphrase)) {
+    private boolean isOwnedWifiGroup(WifiP2pGroup group) {
+        if (group == null) {
+            return false;
+        }
+        String[] credentials = loadOrCreateGroupCredentials();
+        return WifiDirectGroupOwnership.isOwned(
+                group.isGroupOwner(),
+                valueOrEmpty(group.getNetworkName()),
+                valueOrEmpty(group.getPassphrase()),
+                WifiDirectBand.supportsSelection(),
+                credentials[0],
+                credentials[1],
+                wifiGroupCreationAccepted,
+                loadLegacyOwnedGroupSsid());
+    }
+
+    private void acceptOwnedWifiGroup(WifiP2pGroup group) {
+        wifiGroupOwned = true;
+        wifiGroupClientCount = group.getClientList() == null ? 0 : group.getClientList().size();
+        if (!WifiDirectBand.supportsSelection() && wifiGroupCreationAccepted) {
+            rememberLegacyOwnedGroupSsid(valueOrEmpty(group.getNetworkName()));
+        }
+        wifiGroupCreationAccepted = false;
+        if (lastError.startsWith("Cannot use active Wi-Fi Direct group because PdaLink does not own it")) {
+            lastError = "";
+        }
+    }
+
+    private void rejectUnownedWifiGroup() {
+        closeWifiProxyServer();
+        wifiGroupOwned = false;
+        wifiGroupCreationAccepted = false;
+        clearGroupInfo();
+        status("Cannot use active Wi-Fi Direct group because PdaLink does not own it; left untouched");
+        updateNotification();
+    }
+
+    private String loadLegacyOwnedGroupSsid() {
+        return valueOrEmpty(getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .getString(PREF_WIFI_DIRECT_LEGACY_OWNED_SSID, ""));
+    }
+
+    private void rememberLegacyOwnedGroupSsid(String ssid) {
+        if (ssid.isEmpty()) {
             return;
         }
         getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
                 .edit()
-                .putString(PREF_WIFI_DIRECT_SSID, ssid)
-                .putString(PREF_WIFI_DIRECT_PASSPHRASE, passphrase)
+                .putString(PREF_WIFI_DIRECT_LEGACY_OWNED_SSID, ssid)
                 .apply();
     }
 
@@ -601,8 +1067,7 @@ public class ProxyService extends Service {
     }
 
     private boolean validGroupCredentials(String ssid, String passphrase) {
-        return ssid.matches("^DIRECT-[A-Za-z0-9]{2}.*")
-                && ssid.getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= 32
+        return ssid.matches("^DIRECT-PD-PdaLink-[A-Za-z0-9]{6}$")
                 && passphrase.matches("^[ -~]{8,63}$");
     }
 
@@ -675,6 +1140,10 @@ public class ProxyService extends Service {
         intent.putExtra(ProxyActions.EXTRA_GROUP_SSID, groupSsid);
         intent.putExtra(ProxyActions.EXTRA_GROUP_PASSPHRASE, groupPassphrase);
         intent.putExtra(ProxyActions.EXTRA_GROUP_INTERFACE, groupInterface);
+        intent.putExtra(ProxyActions.EXTRA_WIFI_GROUP_OWNED, wifiGroupOwned);
+        intent.putExtra(ProxyActions.EXTRA_WIFI_GROUP_CLIENT_COUNT, wifiGroupClientCount);
+        intent.putExtra(ProxyActions.EXTRA_WIFI_TRANSPORT, wifiTransportLabel());
+        intent.putExtra(ProxyActions.EXTRA_WIFI_SECURITY, wifiSecurity);
         intent.putExtra(ProxyActions.EXTRA_WIFI_BAND, requestedWifiBand);
         intent.putExtra(ProxyActions.EXTRA_WIFI_FREQUENCY_MHZ, groupFrequencyMhz);
         intent.putExtra(ProxyActions.EXTRA_LINUX_TARGET, linuxTarget());
@@ -692,7 +1161,8 @@ public class ProxyService extends Service {
     }
 
     private String proxySummary() {
-        return "USB " + usbProxySummary() + "; Wi-Fi Direct " + wifiProxySummary();
+        return "USB " + usbProxySummary() + "; " + wifiTransportLabel()
+                + " " + wifiProxySummary();
     }
 
     private String usbProxySummary() {
@@ -722,17 +1192,30 @@ public class ProxyService extends Service {
         } else {
             primaryMode = ProxyActions.MODE_USB;
         }
-        if (!wifiDirectEnabled) {
+        if (!wifiDirectEnabled && !localHotspotEnabled) {
             return primaryMode;
         }
+        String wifiMode = wifiTransportLabel();
         if (currentMode == Mode.PRODUCT_USB) {
-            return primaryMode + " + " + ProxyActions.MODE_WIFI_DIRECT;
+            return primaryMode + " + " + wifiMode;
         }
-        return ProxyActions.MODE_USB_WIFI_DIRECT;
+        return localHotspotEnabled
+                ? ProxyActions.MODE_USB_LOCAL_HOTSPOT
+                : ProxyActions.MODE_USB_WIFI_DIRECT;
+    }
+
+    private String wifiTransportLabel() {
+        if (localHotspotEnabled) {
+            return ProxyActions.MODE_LOCAL_HOTSPOT;
+        }
+        if (wifiDirectEnabled) {
+            return ProxyActions.MODE_WIFI_DIRECT;
+        }
+        return "Wi-Fi";
     }
 
     private String linuxTarget() {
-        if (wifiDirectEnabled) {
+        if (wifiDirectEnabled || localHotspotEnabled) {
             return wifiTarget();
         }
         if (currentMode == Mode.PRODUCT_USB) {
@@ -748,7 +1231,9 @@ public class ProxyService extends Service {
 
     private String wifiTarget() {
         int port = wifiProxyPort();
-        return port <= 0 ? "not ready" : "http://" + WIFI_HOST + ":" + port;
+        return port <= 0 || wifiProxyHost.isEmpty()
+                ? "not ready"
+                : "http://" + wifiProxyHost + ":" + port;
     }
 
     private String latestRequest() {
@@ -779,6 +1264,9 @@ public class ProxyService extends Service {
     private Mode parseMode(String action) {
         if (ProxyActions.ACTION_START_WIFI_DIRECT.equals(action)) {
             return Mode.WIFI_DIRECT;
+        }
+        if (ProxyActions.ACTION_START_LOCAL_HOTSPOT.equals(action)) {
+            return Mode.LOCAL_HOTSPOT;
         }
         if (ProxyActions.ACTION_START_PRODUCT_USB.equals(action)) {
             return Mode.PRODUCT_USB;
@@ -821,6 +1309,13 @@ public class ProxyService extends Service {
                 .edit()
                 .putBoolean(PREF_WIFI_DIRECT_ENABLED, enabled)
                 .apply();
+    }
+
+    private void setLocalHotspotEnabled(boolean enabled) {
+        localHotspotEnabled = enabled;
+        if (!enabled) {
+            localHotspotStartAuthorized = false;
+        }
     }
 
     private void createNotificationChannel() {

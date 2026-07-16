@@ -1,6 +1,7 @@
 package dev.pdalink.prototype;
 
 import android.Manifest;
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.BroadcastReceiver;
@@ -60,7 +61,7 @@ public class MainActivity extends Activity {
         usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
         selectedWifiBand = WifiDirectBand.load(this);
         buildUi();
-        appendStatus("Ready. USB and Wi-Fi Direct can run together.");
+        appendStatus("Ready. USB can run with one Wi-Fi transport.");
         handleProductUsbIntent(getIntent());
     }
 
@@ -72,6 +73,7 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
     protected void onStart() {
         super.onStart();
         IntentFilter filter = new IntentFilter(ProxyActions.ACTION_STATUS);
@@ -86,6 +88,7 @@ public class MainActivity extends Activity {
         } else {
             registerReceiver(productUsbPermissionReceiver, usbFilter);
         }
+        sendServiceAction(ProxyActions.ACTION_REFRESH);
     }
 
     @Override
@@ -126,18 +129,19 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView hint = new TextView(this);
-        hint.setText("USB stays on 127.0.0.1:8000; Wi-Fi Direct adds 192.168.49.1:8001.");
+        hint.setText("USB 127.0.0.1:8000 | Wi-Fi port 8001");
         hint.setTextSize(14);
         root.addView(hint);
 
         summaryView = new TextView(this);
         summaryView.setText("Mode: " + ProxyActions.MODE_USB
-                + "\nUSB proxy: not started\nWi-Fi Direct proxy: not started"
+                + "\nUSB proxy: not started\nWi-Fi proxy: not started"
+                + "\nWi-Fi transport: not active\nWi-Fi clients: not active"
+                + "\nWi-Fi security: not active"
+                + "\nActive proxy connections: 0"
                 + "\nInternet usage: down 0 B / up 0 B\nEgress: unknown"
-                + "\nWi-Fi Direct: not active"
-                + "\nWi-Fi Direct band: requested " + WifiDirectBand.label(selectedWifiBand)
-                + " / actual not active"
-                + "\nUSB target: not ready\nWi-Fi Direct target: not ready");
+                + "\nWi-Fi network: not active\nWi-Fi band: not active"
+                + "\nUSB target: not ready\nWi-Fi target: not ready");
         summaryView.setTextSize(14);
         summaryView.setTextIsSelectable(true);
         summaryView.setPadding(0, dp(12), 0, 0);
@@ -190,20 +194,33 @@ public class MainActivity extends Activity {
         startProductUsb.setOnClickListener(v -> startProductUsb());
         buttons.addView(startProductUsb, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
+        root.addView(buttons);
+
+        LinearLayout wifiButtons = new LinearLayout(this);
+        wifiButtons.setOrientation(LinearLayout.HORIZONTAL);
+        wifiButtons.setPadding(0, 0, 0, dp(12));
+
+        Button startLocalHotspot = new Button(this);
+        startLocalHotspot.setText("Add Local Hotspot");
+        startLocalHotspot.setOnClickListener(v -> startLocalHotspot());
+        wifiButtons.addView(startLocalHotspot,
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
         Button startWifi = new Button(this);
         startWifi.setText("Add Wi-Fi Direct");
         startWifi.setOnClickListener(v -> startWifiDirect());
-        buttons.addView(startWifi, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        wifiButtons.addView(startWifi,
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
-        root.addView(buttons);
+        root.addView(wifiButtons);
 
         LinearLayout controls = new LinearLayout(this);
         controls.setOrientation(LinearLayout.HORIZONTAL);
         controls.setPadding(0, 0, 0, dp(12));
 
         Button stopWifi = new Button(this);
-        stopWifi.setText("Stop Wi-Fi Direct");
-        stopWifi.setOnClickListener(v -> sendServiceAction(ProxyActions.ACTION_STOP_WIFI_DIRECT));
+        stopWifi.setText("Stop Wi-Fi");
+        stopWifi.setOnClickListener(v -> sendServiceAction(ProxyActions.ACTION_STOP_WIFI));
         controls.addView(stopWifi, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
         Button refresh = new Button(this);
@@ -369,6 +386,19 @@ public class MainActivity extends Activity {
         sendWifiDirectAction();
     }
 
+    private void startLocalHotspot() {
+        if (Build.VERSION.SDK_INT < 26) {
+            appendStatus("Local Hotspot requires Android 8.0 or later.");
+            return;
+        }
+        if (requestRuntimePermissions(ProxyActions.MODE_LOCAL_HOTSPOT)) {
+            startModeAfterPermission = ProxyActions.MODE_LOCAL_HOTSPOT;
+            appendStatus("Waiting for Local Hotspot permissions.");
+            return;
+        }
+        sendServiceAction(ProxyActions.ACTION_START_LOCAL_HOTSPOT);
+    }
+
     private void sendWifiDirectAction() {
         Intent intent = new Intent(this, ProxyService.class);
         intent.setAction(ProxyActions.ACTION_START_WIFI_DIRECT);
@@ -405,10 +435,13 @@ public class MainActivity extends Activity {
         List<String> missing = new ArrayList<>();
         if (Build.VERSION.SDK_INT >= 33) {
             addIfMissing(missing, Manifest.permission.POST_NOTIFICATIONS);
-            if (ProxyActions.MODE_WIFI_DIRECT.equals(mode)) {
+            if (ProxyActions.MODE_WIFI_DIRECT.equals(mode)
+                    || ProxyActions.MODE_LOCAL_HOTSPOT.equals(mode)) {
                 addIfMissing(missing, Manifest.permission.NEARBY_WIFI_DEVICES);
             }
-        } else if (ProxyActions.MODE_WIFI_DIRECT.equals(mode)) {
+        } else if (ProxyActions.MODE_WIFI_DIRECT.equals(mode)
+                || ProxyActions.MODE_LOCAL_HOTSPOT.equals(mode)) {
+            addIfMissing(missing, Manifest.permission.ACCESS_COARSE_LOCATION);
             addIfMissing(missing, Manifest.permission.ACCESS_FINE_LOCATION);
         }
         if (!missing.isEmpty()) {
@@ -445,6 +478,12 @@ public class MainActivity extends Activity {
         String ssid = valueOrDefault(intent.getStringExtra(ProxyActions.EXTRA_GROUP_SSID), "not active");
         String passphrase = valueOrDefault(intent.getStringExtra(ProxyActions.EXTRA_GROUP_PASSPHRASE), "");
         String iface = valueOrDefault(intent.getStringExtra(ProxyActions.EXTRA_GROUP_INTERFACE), "");
+        String wifiTransport = valueOrDefault(
+                intent.getStringExtra(ProxyActions.EXTRA_WIFI_TRANSPORT), "Wi-Fi");
+        String wifiSecurity = valueOrDefault(
+                intent.getStringExtra(ProxyActions.EXTRA_WIFI_SECURITY), "not active");
+        boolean groupOwned = intent.getBooleanExtra(ProxyActions.EXTRA_WIFI_GROUP_OWNED, false);
+        int groupClients = intent.getIntExtra(ProxyActions.EXTRA_WIFI_GROUP_CLIENT_COUNT, 0);
         String requestedBand = WifiDirectBand.normalize(
                 intent.getStringExtra(ProxyActions.EXTRA_WIFI_BAND));
         int frequencyMhz = intent.getIntExtra(ProxyActions.EXTRA_WIFI_FREQUENCY_MHZ, 0);
@@ -458,8 +497,11 @@ public class MainActivity extends Activity {
         long upBytes = intent.getLongExtra(ProxyActions.EXTRA_TRAFFIC_UP_BYTES, 0L);
         long downBytes = intent.getLongExtra(ProxyActions.EXTRA_TRAFFIC_DOWN_BYTES, 0L);
 
+        boolean wifiDirectActive = mode.contains(ProxyActions.MODE_WIFI_DIRECT);
+        boolean localHotspotActive = mode.contains(ProxyActions.MODE_LOCAL_HOTSPOT);
+        boolean wifiActive = wifiDirectActive || localHotspotActive;
         String wifi = "not active";
-        if (mode.contains(ProxyActions.MODE_WIFI_DIRECT)) {
+        if (wifiActive) {
             wifi = ssid;
             if (!passphrase.isEmpty()) {
                 wifi += " / password " + passphrase;
@@ -468,19 +510,44 @@ public class MainActivity extends Activity {
                 wifi += " / " + iface;
             }
         }
+        String groupOwnership = "not active";
+        if (localHotspotActive) {
+            groupOwnership = "app reservation";
+        } else if (groupOwned) {
+            groupOwnership = "PdaLink";
+        } else if (error.startsWith("Cannot use active Wi-Fi Direct group")) {
+            groupOwnership = "not owned";
+        }
+
+        String wifiClients = "not active";
+        if (localHotspotActive) {
+            wifiClients = "not exposed";
+        } else if (wifiDirectActive) {
+            wifiClients = Integer.toString(groupClients);
+        }
+        String wifiBand = "not active";
+        if (localHotspotActive) {
+            wifiBand = "managed by Android";
+        } else if (wifiDirectActive) {
+            wifiBand = "requested " + WifiDirectBand.label(requestedBand)
+                    + " / actual " + WifiDirectBand.frequencyLabel(frequencyMhz);
+        }
 
         summaryView.setText("Mode: " + mode
                 + "\nUSB proxy: " + usbProxy
-                + "\nWi-Fi Direct proxy: " + wifiProxy
-                + "\nActive proxy clients: " + clients
+                + "\nWi-Fi proxy: " + wifiProxy
+                + "\nWi-Fi transport: " + wifiTransport
+                + "\nWi-Fi ownership: " + groupOwnership
+                + "\nWi-Fi clients: " + wifiClients
+                + "\nWi-Fi security: " + wifiSecurity
+                + "\nActive proxy connections: " + clients
                 + "\nInternet usage: down " + formatBytes(downBytes) + " / up " + formatBytes(upBytes)
                 + "\nEgress: " + egress
                 + "\nProduct USB: " + productUsb
-                + "\nWi-Fi Direct: " + wifi
-                + "\nWi-Fi Direct band: requested " + WifiDirectBand.label(requestedBand)
-                + " / actual " + WifiDirectBand.frequencyLabel(frequencyMhz)
+                + "\nWi-Fi network: " + wifi
+                + "\nWi-Fi band: " + wifiBand
                 + "\nUSB target: " + usbTarget
-                + "\nWi-Fi Direct target: " + wifiTarget
+                + "\nWi-Fi target: " + wifiTarget
                 + "\nLast request: " + request
                 + "\nLast error: " + error);
     }
@@ -529,6 +596,8 @@ public class MainActivity extends Activity {
         startModeAfterPermission = null;
         if (ProxyActions.MODE_WIFI_DIRECT.equals(mode)) {
             sendWifiDirectAction();
+        } else if (ProxyActions.MODE_LOCAL_HOTSPOT.equals(mode)) {
+            sendServiceAction(ProxyActions.ACTION_START_LOCAL_HOTSPOT);
         } else {
             sendServiceAction(ProxyActions.ACTION_START_USB);
         }

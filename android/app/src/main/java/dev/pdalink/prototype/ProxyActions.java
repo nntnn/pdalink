@@ -3,9 +3,15 @@ package dev.pdalink.prototype;
 final class ProxyActions {
     static final String ACTION_START = "dev.pdalink.prototype.START";
     static final String ACTION_START_USB = "dev.pdalink.prototype.START_USB";
+    static final String ACTION_STOP_USB = "dev.pdalink.prototype.STOP_USB";
     static final String ACTION_START_PRODUCT_USB = "dev.pdalink.prototype.START_PRODUCT_USB";
     static final String ACTION_START_WIFI_DIRECT = "dev.pdalink.prototype.START_WIFI_DIRECT";
     static final String ACTION_STOP_WIFI_DIRECT = "dev.pdalink.prototype.STOP_WIFI_DIRECT";
+    static final String ACTION_START_LOCAL_HOTSPOT = "dev.pdalink.prototype.START_LOCAL_HOTSPOT";
+    static final String ACTION_STOP_LOCAL_HOTSPOT = "dev.pdalink.prototype.STOP_LOCAL_HOTSPOT";
+    static final String ACTION_QUERY_LOCAL_HOTSPOT =
+            "dev.pdalink.prototype.QUERY_LOCAL_HOTSPOT";
+    static final String ACTION_STOP_WIFI = "dev.pdalink.prototype.STOP_WIFI";
     static final String ACTION_STOP = "dev.pdalink.prototype.STOP";
     static final String ACTION_REFRESH = "dev.pdalink.prototype.REFRESH";
     static final String ACTION_STATUS = "dev.pdalink.prototype.STATUS";
@@ -19,6 +25,10 @@ final class ProxyActions {
     static final String EXTRA_GROUP_SSID = "group_ssid";
     static final String EXTRA_GROUP_PASSPHRASE = "group_passphrase";
     static final String EXTRA_GROUP_INTERFACE = "group_interface";
+    static final String EXTRA_WIFI_GROUP_OWNED = "wifi_direct_group_owned";
+    static final String EXTRA_WIFI_GROUP_CLIENT_COUNT = "wifi_direct_group_client_count";
+    static final String EXTRA_WIFI_TRANSPORT = "wifi_transport";
+    static final String EXTRA_WIFI_SECURITY = "wifi_security";
     static final String EXTRA_WIFI_BAND = "wifi_direct_band";
     static final String EXTRA_WIFI_FREQUENCY_MHZ = "wifi_direct_frequency_mhz";
     static final String EXTRA_LINUX_TARGET = "linux_target";
@@ -34,7 +44,9 @@ final class ProxyActions {
     static final String MODE_USB = "USB";
     static final String MODE_PRODUCT_USB = "Product USB";
     static final String MODE_WIFI_DIRECT = "Wi-Fi Direct";
+    static final String MODE_LOCAL_HOTSPOT = "Local Hotspot";
     static final String MODE_USB_WIFI_DIRECT = "USB + Wi-Fi Direct";
+    static final String MODE_USB_LOCAL_HOTSPOT = "USB + Local Hotspot";
 
     private ProxyActions() {
     }
