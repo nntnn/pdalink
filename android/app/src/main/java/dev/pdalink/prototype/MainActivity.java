@@ -16,6 +16,8 @@ import android.os.Bundle;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.LinearLayout;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
@@ -33,6 +35,8 @@ public class MainActivity extends Activity {
     private TextView summaryView;
     private TextView logView;
     private ScrollView logScroller;
+    private RadioGroup wifiBandGroup;
+    private String selectedWifiBand = WifiDirectBand.AUTO;
     private String startModeAfterPermission;
     private UsbManager usbManager;
     private UsbAccessory pendingProductAccessory;
@@ -54,6 +58,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
+        selectedWifiBand = WifiDirectBand.load(this);
         buildUi();
         appendStatus("Ready. USB and Wi-Fi Direct can run together.");
         handleProductUsbIntent(getIntent());
@@ -129,13 +134,47 @@ public class MainActivity extends Activity {
         summaryView.setText("Mode: " + ProxyActions.MODE_USB
                 + "\nUSB proxy: not started\nWi-Fi Direct proxy: not started"
                 + "\nInternet usage: down 0 B / up 0 B\nEgress: unknown"
-                + "\nWi-Fi Direct: not active\nUSB target: not ready\nWi-Fi Direct target: not ready");
+                + "\nWi-Fi Direct: not active"
+                + "\nWi-Fi Direct band: requested " + WifiDirectBand.label(selectedWifiBand)
+                + " / actual not active"
+                + "\nUSB target: not ready\nWi-Fi Direct target: not ready");
         summaryView.setTextSize(14);
         summaryView.setTextIsSelectable(true);
         summaryView.setPadding(0, dp(12), 0, 0);
         root.addView(summaryView, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        TextView wifiBandTitle = new TextView(this);
+        wifiBandTitle.setText("Wi-Fi Direct band");
+        wifiBandTitle.setTextSize(14);
+        wifiBandTitle.setPadding(0, dp(12), 0, 0);
+        root.addView(wifiBandTitle);
+
+        wifiBandGroup = new RadioGroup(this);
+        wifiBandGroup.setOrientation(RadioGroup.HORIZONTAL);
+        addWifiBandOption("Automatic", WifiDirectBand.AUTO, true);
+        addWifiBandOption("2.4 GHz", WifiDirectBand.BAND_2_GHZ, WifiDirectBand.supportsSelection());
+        addWifiBandOption("5 GHz", WifiDirectBand.BAND_5_GHZ, WifiDirectBand.supportsSelection());
+        wifiBandGroup.setOnCheckedChangeListener((group, checkedId) -> {
+            RadioButton selected = findViewById(checkedId);
+            if (selected == null || !(selected.getTag() instanceof String)) {
+                return;
+            }
+            selectedWifiBand = WifiDirectBand.save(this, (String) selected.getTag());
+            appendStatus("Wi-Fi Direct band selected: " + WifiDirectBand.label(selectedWifiBand)
+                    + ". Tap Add Wi-Fi Direct to apply.");
+        });
+        root.addView(wifiBandGroup, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        if (!WifiDirectBand.supportsSelection()) {
+            TextView legacyBandHint = new TextView(this);
+            legacyBandHint.setText("Android 9 or earlier supports Automatic band selection only.");
+            legacyBandHint.setTextSize(12);
+            root.addView(legacyBandHint);
+        }
 
         LinearLayout buttons = new LinearLayout(this);
         buttons.setOrientation(LinearLayout.HORIZONTAL);
@@ -191,6 +230,19 @@ public class MainActivity extends Activity {
                 1));
 
         setContentView(root);
+    }
+
+    private void addWifiBandOption(String label, String value, boolean enabled) {
+        RadioButton option = new RadioButton(this);
+        option.setId(android.view.View.generateViewId());
+        option.setText(label);
+        option.setTag(value);
+        option.setEnabled(enabled);
+        option.setChecked(value.equals(selectedWifiBand));
+        wifiBandGroup.addView(option, new RadioGroup.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1));
     }
 
     private void startUsb() {
@@ -314,7 +366,18 @@ public class MainActivity extends Activity {
             appendStatus("Waiting for Wi-Fi Direct permissions.");
             return;
         }
-        sendServiceAction(ProxyActions.ACTION_START_WIFI_DIRECT);
+        sendWifiDirectAction();
+    }
+
+    private void sendWifiDirectAction() {
+        Intent intent = new Intent(this, ProxyService.class);
+        intent.setAction(ProxyActions.ACTION_START_WIFI_DIRECT);
+        intent.putExtra(ProxyActions.EXTRA_WIFI_BAND, selectedWifiBand);
+        if (Build.VERSION.SDK_INT >= 26) {
+            startForegroundService(intent);
+        } else {
+            startService(intent);
+        }
     }
 
     private void sendServiceAction(String action) {
@@ -382,6 +445,9 @@ public class MainActivity extends Activity {
         String ssid = valueOrDefault(intent.getStringExtra(ProxyActions.EXTRA_GROUP_SSID), "not active");
         String passphrase = valueOrDefault(intent.getStringExtra(ProxyActions.EXTRA_GROUP_PASSPHRASE), "");
         String iface = valueOrDefault(intent.getStringExtra(ProxyActions.EXTRA_GROUP_INTERFACE), "");
+        String requestedBand = WifiDirectBand.normalize(
+                intent.getStringExtra(ProxyActions.EXTRA_WIFI_BAND));
+        int frequencyMhz = intent.getIntExtra(ProxyActions.EXTRA_WIFI_FREQUENCY_MHZ, 0);
         String target = valueOrDefault(intent.getStringExtra(ProxyActions.EXTRA_LINUX_TARGET), "not ready");
         String usbTarget = valueOrDefault(intent.getStringExtra(ProxyActions.EXTRA_USB_TARGET), target);
         String wifiTarget = valueOrDefault(intent.getStringExtra(ProxyActions.EXTRA_WIFI_TARGET), "not ready");
@@ -411,6 +477,8 @@ public class MainActivity extends Activity {
                 + "\nEgress: " + egress
                 + "\nProduct USB: " + productUsb
                 + "\nWi-Fi Direct: " + wifi
+                + "\nWi-Fi Direct band: requested " + WifiDirectBand.label(requestedBand)
+                + " / actual " + WifiDirectBand.frequencyLabel(frequencyMhz)
                 + "\nUSB target: " + usbTarget
                 + "\nWi-Fi Direct target: " + wifiTarget
                 + "\nLast request: " + request
@@ -460,7 +528,7 @@ public class MainActivity extends Activity {
         String mode = startModeAfterPermission;
         startModeAfterPermission = null;
         if (ProxyActions.MODE_WIFI_DIRECT.equals(mode)) {
-            sendServiceAction(ProxyActions.ACTION_START_WIFI_DIRECT);
+            sendWifiDirectAction();
         } else {
             sendServiceAction(ProxyActions.ACTION_START_USB);
         }

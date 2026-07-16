@@ -104,6 +104,11 @@ Starting Wi-Fi Direct is additive: the Android USB proxy remains on
 listener; it does not stop the USB proxy. Use the app's `Stop All` action or the
 full Android `STOP` action only when both transports should stop.
 
+On Android 10 or later, the app can create the Direct group in Automatic,
+2.4 GHz, or 5 GHz mode. Changing the selection recreates only the Direct group,
+keeps its saved SSID/passphrase, and leaves the USB proxy running. The app
+shows the requested band and actual operating frequency.
+
 On phones that cannot run hotspot and Wi-Fi Direct together, use the hotspot
 only as the APK-install safety path. Restore and verify USB first, then turn the
 hotspot off before `wifi start-android`; the USB route keeps the laptop online

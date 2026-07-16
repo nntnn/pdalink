@@ -11,6 +11,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
+import android.net.wifi.p2p.WifiP2pConfig;
 import android.net.wifi.p2p.WifiP2pGroup;
 import android.net.wifi.p2p.WifiP2pManager;
 import android.os.Build;
@@ -18,6 +19,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.util.Log;
 
+import java.security.SecureRandom;
 import java.util.Locale;
 
 public class ProxyService extends Service {
@@ -27,6 +29,8 @@ public class ProxyService extends Service {
     private static final String PREFS_NAME = "pdalink_proxy";
     private static final String PREF_MODE = "mode";
     private static final String PREF_WIFI_DIRECT_ENABLED = "wifi_direct_enabled";
+    private static final String PREF_WIFI_DIRECT_SSID = "wifi_direct_ssid";
+    private static final String PREF_WIFI_DIRECT_PASSPHRASE = "wifi_direct_passphrase";
     private static final String WIFI_HOST = "192.168.49.1";
     private static final String WIFI_DIRECT_CLIENT_PREFIX = "192.168.49.";
     private static final String USB_HOST = "127.0.0.1";
@@ -48,6 +52,9 @@ public class ProxyService extends Service {
     private String groupSsid = "";
     private String groupPassphrase = "";
     private String groupInterface = "";
+    private String requestedWifiBand = WifiDirectBand.AUTO;
+    private int groupFrequencyMhz;
+    private boolean wifiGroupOperationInProgress;
     private String lastRequest = "";
     private String lastError = "";
     private String productUsbStatus = "permission missing";
@@ -58,6 +65,7 @@ public class ProxyService extends Service {
         createNotificationChannel();
         startForegroundCompat("PdaLink starting");
         mainHandler = new Handler(getMainLooper());
+        requestedWifiBand = WifiDirectBand.load(this);
         Mode savedMode = loadSavedMode();
         if (savedMode == Mode.WIFI_DIRECT) {
             currentMode = Mode.USB;
@@ -74,6 +82,12 @@ public class ProxyService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? null : intent.getAction();
+        if (ProxyActions.ACTION_START_WIFI_DIRECT.equals(action)
+                && intent.hasExtra(ProxyActions.EXTRA_WIFI_BAND)) {
+            requestedWifiBand = WifiDirectBand.save(
+                    this,
+                    intent.getStringExtra(ProxyActions.EXTRA_WIFI_BAND));
+        }
         if (ProxyActions.ACTION_STOP.equals(action)) {
             setWifiDirectEnabled(false);
             status("Stopping service");
@@ -272,6 +286,7 @@ public class ProxyService extends Service {
 
     private void stopWifiDirect() {
         setWifiDirectEnabled(false);
+        wifiGroupOperationInProgress = false;
         removeWifiGroupBestEffort();
         clearWifiReceiver();
         closeWifiProxyServer();
@@ -322,6 +337,7 @@ public class ProxyService extends Service {
         groupSsid = "";
         groupPassphrase = "";
         groupInterface = "";
+        groupFrequencyMhz = 0;
     }
 
     private String valueOrEmpty(String value) {
@@ -329,7 +345,7 @@ public class ProxyService extends Service {
     }
 
     private void createGroup() {
-        if (!wifiDirectEnabled) {
+        if (!wifiDirectEnabled || wifiGroupOperationInProgress) {
             return;
         }
         if (wifiP2pManager == null || wifiP2pChannel == null) {
@@ -341,7 +357,7 @@ public class ProxyService extends Service {
         try {
             wifiP2pManager.requestGroupInfo(wifiP2pChannel, group -> {
                 if (group != null) {
-                    publishGroupInfo(group);
+                    handleExistingGroup(group);
                     return;
                 }
                 createGroupInternal(true);
@@ -355,29 +371,94 @@ public class ProxyService extends Service {
     }
 
     private void createGroupInternal(boolean retryAfterBusy) {
-        if (!wifiDirectEnabled || wifiP2pManager == null || wifiP2pChannel == null) {
+        if (!wifiDirectEnabled || wifiGroupOperationInProgress
+                || wifiP2pManager == null || wifiP2pChannel == null) {
             return;
         }
+        WifiP2pManager.ActionListener listener = new WifiP2pManager.ActionListener() {
+            @Override
+            public void onSuccess() {
+                wifiGroupOperationInProgress = false;
+                status("createGroup accepted for " + WifiDirectBand.label(requestedWifiBand));
+                requestGroupInfo();
+            }
+
+            @Override
+            public void onFailure(int reason) {
+                wifiGroupOperationInProgress = false;
+                status("createGroup rejected for " + WifiDirectBand.label(requestedWifiBand)
+                        + ": " + p2pReason(reason));
+                if (retryAfterBusy && reason == WifiP2pManager.BUSY) {
+                    recoverBusyP2pGroup();
+                }
+            }
+        };
         try {
-            wifiP2pManager.createGroup(wifiP2pChannel, new SimpleActionListener("createGroup") {
+            wifiGroupOperationInProgress = true;
+            if (WifiDirectBand.supportsSelection()) {
+                wifiP2pManager.createGroup(wifiP2pChannel, buildWifiP2pConfig(), listener);
+            } else {
+                wifiP2pManager.createGroup(wifiP2pChannel, listener);
+            }
+        } catch (SecurityException ex) {
+            wifiGroupOperationInProgress = false;
+            status("Missing Wi-Fi Direct permission: " + ex.getMessage());
+        } catch (RuntimeException ex) {
+            wifiGroupOperationInProgress = false;
+            status("createGroup failed: " + ex.getMessage());
+        }
+    }
+
+    private WifiP2pConfig buildWifiP2pConfig() {
+        String[] credentials = loadOrCreateGroupCredentials();
+        return new WifiP2pConfig.Builder()
+                .setNetworkName(credentials[0])
+                .setPassphrase(credentials[1])
+                .setGroupOperatingBand(WifiDirectBand.toPlatformBand(requestedWifiBand))
+                .enablePersistentMode(false)
+                .build();
+    }
+
+    private void handleExistingGroup(WifiP2pGroup group) {
+        rememberGroupCredentials(group);
+        int frequencyMhz = groupFrequency(group);
+        if (WifiDirectBand.matchesFrequency(requestedWifiBand, frequencyMhz)) {
+            publishGroupInfo(group);
+            return;
+        }
+        recreateGroupForRequestedBand(frequencyMhz);
+    }
+
+    private void recreateGroupForRequestedBand(int currentFrequencyMhz) {
+        if (wifiGroupOperationInProgress) {
+            return;
+        }
+        closeWifiProxyServer();
+        clearGroupInfo();
+        status("Switching Wi-Fi Direct from " + WifiDirectBand.frequencyLabel(currentFrequencyMhz)
+                + " to " + WifiDirectBand.label(requestedWifiBand));
+        wifiGroupOperationInProgress = true;
+        try {
+            wifiP2pManager.removeGroup(wifiP2pChannel, new WifiP2pManager.ActionListener() {
                 @Override
                 public void onSuccess() {
-                    super.onSuccess();
-                    requestGroupInfo();
+                    wifiGroupOperationInProgress = false;
+                    status("Previous Wi-Fi Direct group removed for band switch");
+                    createGroupInternal(false);
                 }
 
                 @Override
                 public void onFailure(int reason) {
-                    status("createGroup rejected: " + p2pReason(reason));
-                    if (retryAfterBusy && reason == WifiP2pManager.BUSY) {
-                        recoverBusyP2pGroup();
-                    }
+                    wifiGroupOperationInProgress = false;
+                    status("Band switch removeGroup rejected: " + p2pReason(reason));
                 }
             });
         } catch (SecurityException ex) {
-            status("Missing Wi-Fi Direct permission: " + ex.getMessage());
+            wifiGroupOperationInProgress = false;
+            status("Cannot switch Wi-Fi Direct band; permission missing");
         } catch (RuntimeException ex) {
-            status("createGroup failed: " + ex.getMessage());
+            wifiGroupOperationInProgress = false;
+            status("Band switch removeGroup failed: " + ex.getMessage());
         }
     }
 
@@ -385,8 +466,8 @@ public class ProxyService extends Service {
         try {
             wifiP2pManager.requestGroupInfo(wifiP2pChannel, group -> {
                 if (group != null) {
-                    status("Wi-Fi Direct busy; using existing group");
-                    publishGroupInfo(group);
+                    status("Wi-Fi Direct busy; checking existing group band");
+                    handleExistingGroup(group);
                     return;
                 }
                 removeGroupBeforeRetry();
@@ -402,22 +483,27 @@ public class ProxyService extends Service {
     private void removeGroupBeforeRetry() {
         status("Wi-Fi Direct busy; removing stale group before one retry");
         try {
+            wifiGroupOperationInProgress = true;
             wifiP2pManager.removeGroup(wifiP2pChannel, new SimpleActionListener("removeGroup before retry") {
                 @Override
                 public void onSuccess() {
+                    wifiGroupOperationInProgress = false;
                     super.onSuccess();
                     retryCreateGroupOnce();
                 }
 
                 @Override
                 public void onFailure(int reason) {
+                    wifiGroupOperationInProgress = false;
                     status("removeGroup before retry rejected: " + p2pReason(reason));
                     retryCreateGroupOnce();
                 }
             });
         } catch (SecurityException ex) {
+            wifiGroupOperationInProgress = false;
             status("Cannot remove stale Wi-Fi Direct group; permission missing");
         } catch (RuntimeException ex) {
+            wifiGroupOperationInProgress = false;
             status("removeGroup before retry failed: " + ex.getMessage());
             retryCreateGroupOnce();
         }
@@ -457,17 +543,76 @@ public class ProxyService extends Service {
         groupSsid = valueOrEmpty(group.getNetworkName());
         groupPassphrase = valueOrEmpty(group.getPassphrase());
         groupInterface = valueOrEmpty(group.getInterface());
+        groupFrequencyMhz = groupFrequency(group);
         if (groupSsid.isEmpty()) {
             closeWifiProxyServer();
             status("Wi-Fi Direct group missing network name");
+            return;
+        }
+        rememberGroupCredentials(group);
+        if (!WifiDirectBand.matchesFrequency(requestedWifiBand, groupFrequencyMhz)) {
+            closeWifiProxyServer();
+            status("Wi-Fi Direct group used " + WifiDirectBand.frequencyLabel(groupFrequencyMhz)
+                    + " instead of requested " + WifiDirectBand.label(requestedWifiBand));
             return;
         }
         ensureWifiProxyServer();
         status("Group SSID: " + groupSsid);
         status("Group password: available in app summary");
         status("Group interface: " + groupInterface);
+        status("Group band: " + WifiDirectBand.frequencyLabel(groupFrequencyMhz)
+                + " (requested " + WifiDirectBand.label(requestedWifiBand) + ")");
         status("Wi-Fi Direct proxy target: " + wifiTarget());
         updateNotification();
+    }
+
+    private int groupFrequency(WifiP2pGroup group) {
+        return Build.VERSION.SDK_INT >= 29 ? group.getFrequency() : 0;
+    }
+
+    private void rememberGroupCredentials(WifiP2pGroup group) {
+        String ssid = valueOrEmpty(group.getNetworkName());
+        String passphrase = valueOrEmpty(group.getPassphrase());
+        if (!validGroupCredentials(ssid, passphrase)) {
+            return;
+        }
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .edit()
+                .putString(PREF_WIFI_DIRECT_SSID, ssid)
+                .putString(PREF_WIFI_DIRECT_PASSPHRASE, passphrase)
+                .apply();
+    }
+
+    private String[] loadOrCreateGroupCredentials() {
+        SharedPreferences preferences = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        String ssid = valueOrEmpty(preferences.getString(PREF_WIFI_DIRECT_SSID, ""));
+        String passphrase = valueOrEmpty(preferences.getString(PREF_WIFI_DIRECT_PASSPHRASE, ""));
+        if (validGroupCredentials(ssid, passphrase)) {
+            return new String[]{ssid, passphrase};
+        }
+        SecureRandom random = new SecureRandom();
+        ssid = "DIRECT-PD-PdaLink-" + randomToken(random, 6);
+        passphrase = randomToken(random, 16);
+        preferences.edit()
+                .putString(PREF_WIFI_DIRECT_SSID, ssid)
+                .putString(PREF_WIFI_DIRECT_PASSPHRASE, passphrase)
+                .apply();
+        return new String[]{ssid, passphrase};
+    }
+
+    private boolean validGroupCredentials(String ssid, String passphrase) {
+        return ssid.matches("^DIRECT-[A-Za-z0-9]{2}.*")
+                && ssid.getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= 32
+                && passphrase.matches("^[ -~]{8,63}$");
+    }
+
+    private String randomToken(SecureRandom random, int length) {
+        String alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+        StringBuilder token = new StringBuilder(length);
+        for (int index = 0; index < length; index++) {
+            token.append(alphabet.charAt(random.nextInt(alphabet.length())));
+        }
+        return token.toString();
     }
 
     private void updateNotification() {
@@ -530,6 +675,8 @@ public class ProxyService extends Service {
         intent.putExtra(ProxyActions.EXTRA_GROUP_SSID, groupSsid);
         intent.putExtra(ProxyActions.EXTRA_GROUP_PASSPHRASE, groupPassphrase);
         intent.putExtra(ProxyActions.EXTRA_GROUP_INTERFACE, groupInterface);
+        intent.putExtra(ProxyActions.EXTRA_WIFI_BAND, requestedWifiBand);
+        intent.putExtra(ProxyActions.EXTRA_WIFI_FREQUENCY_MHZ, groupFrequencyMhz);
         intent.putExtra(ProxyActions.EXTRA_LINUX_TARGET, linuxTarget());
         intent.putExtra(ProxyActions.EXTRA_USB_TARGET, usbTarget());
         intent.putExtra(ProxyActions.EXTRA_WIFI_TARGET, wifiTarget());

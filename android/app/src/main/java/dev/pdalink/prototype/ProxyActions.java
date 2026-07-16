@@ -19,6 +19,8 @@ final class ProxyActions {
     static final String EXTRA_GROUP_SSID = "group_ssid";
     static final String EXTRA_GROUP_PASSPHRASE = "group_passphrase";
     static final String EXTRA_GROUP_INTERFACE = "group_interface";
+    static final String EXTRA_WIFI_BAND = "wifi_direct_band";
+    static final String EXTRA_WIFI_FREQUENCY_MHZ = "wifi_direct_frequency_mhz";
     static final String EXTRA_LINUX_TARGET = "linux_target";
     static final String EXTRA_USB_TARGET = "usb_target";
     static final String EXTRA_WIFI_TARGET = "wifi_target";

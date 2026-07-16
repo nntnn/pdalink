@@ -49,9 +49,26 @@ If using Android Studio:
 
 1. Open `PdaLink Prototype`.
 2. Grant requested Wi-Fi/nearby device/notification permissions.
-3. Tap `Start USB`, then `Add Wi-Fi Direct`.
-4. Wait for group information.
-5. Note the SSID and passphrase shown by the app.
+3. Select `Automatic`, `2.4 GHz`, or `5 GHz` under `Wi-Fi Direct band`.
+4. Tap `Start USB`, then `Add Wi-Fi Direct`.
+5. Wait for group information.
+6. Confirm the summary shows both the requested band and actual frequency.
+7. Note the SSID and passphrase shown by the app.
+
+Changing the band while a group is active briefly disconnects Wi-Fi Direct
+clients and recreates the group. The app reuses the same SSID and passphrase.
+An explicit 2.4 GHz or 5 GHz failure is reported instead of silently falling
+back to another band. Android 9 and earlier expose `Automatic` only.
+
+Verify all modes on Android 10 or later:
+
+1. Start with `Automatic` and record the actual frequency.
+2. Select `2.4 GHz`, tap `Add Wi-Fi Direct`, and confirm an actual frequency
+   between 2400 and 2499 MHz.
+3. Select `5 GHz`, tap `Add Wi-Fi Direct`, and confirm an actual frequency
+   between 4900 and 5899 MHz.
+4. Confirm the SSID and passphrase are unchanged across steps 2 and 3.
+5. Confirm the USB proxy remains reachable throughout the band changes.
 
 ## Linux Connection
 
@@ -159,6 +176,7 @@ The Android app summary should show:
 - `USB proxy: listening on 127.0.0.1:8000`.
 - `Wi-Fi Direct proxy: listening on 192.168.49.1:8001`.
 - `Wi-Fi Direct:` with SSID, passphrase, and P2P interface.
+- `Wi-Fi Direct band:` with the requested mode and actual MHz.
 - `USB target: http://127.0.0.1:8000`.
 - `Wi-Fi Direct target: http://192.168.49.1:8001`.
 - `Last request:` changing when `probe` or `curl-test` runs.
