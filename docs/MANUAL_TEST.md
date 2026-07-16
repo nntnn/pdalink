@@ -49,11 +49,16 @@ If using Android Studio:
 
 1. Open `PdaLink Prototype`.
 2. Grant requested Wi-Fi/nearby device/notification permissions.
-3. Tap `Start`.
+3. Tap `Start USB`, then `Add Wi-Fi Direct`.
 4. Wait for group information.
 5. Note the SSID and passphrase shown by the app.
 
 ## Linux Connection
+
+If the laptop used the same phone's normal Wi-Fi hotspot as an installation
+safety path, turn that hotspot off after the USB proxy has been restored and
+before creating the Wi-Fi Direct group. On devices that make hotspot and P2P
+mutually exclusive, `dumpsys wifip2p` otherwise remains in `P2pDisabledState`.
 
 Scan:
 
@@ -120,9 +125,12 @@ The returned IP should be the phone's cellular egress IP.
 
 The Android app summary should show:
 
-- `Proxy: listening on 8000` or fallback `8001`.
+- `Mode: USB + Wi-Fi Direct`.
+- `USB proxy: listening on 127.0.0.1:8000`.
+- `Wi-Fi Direct proxy: listening on 192.168.49.1:8001`.
 - `Wi-Fi Direct:` with SSID, passphrase, and P2P interface.
-- `Linux target: http://192.168.49.1:8000`.
+- `USB target: http://127.0.0.1:8000`.
+- `Wi-Fi Direct target: http://192.168.49.1:8001`.
 - `Last request:` changing when `probe` or `curl-test` runs.
 
 ## Debugging
@@ -136,11 +144,11 @@ Android logs:
 Check proxy manually:
 
 ```bash
-curl -v -x http://192.168.49.1:8000 https://example.com/
-curl -v http://192.168.49.1:8000/proxy.pac
+curl -v -x http://192.168.49.1:8001 https://example.com/
+curl -v http://192.168.49.1:8001/proxy.pac
 ```
 
-Fallback port:
+Probe the supported Wi-Fi Direct port list:
 
 ```bash
 python3 linux/pdalink_lite.py probe --ports 8000,8001
@@ -170,6 +178,32 @@ python3 linux/pdalink_lite.py usb-smoke --no-start-android --curl-attempts 3 --u
 before Android has finished binding outbound proxy sockets to cellular data.
 `pdalink.sh usb status` reports the ADB device, TCP forward, proxy probe, and a
 next command to run.
+
+## Concurrent USB And Wi-Fi Direct
+
+Keep the existing USB forward and start Wi-Fi Direct additively:
+
+```bash
+./tools/pdalink.sh usb start --verify
+./tools/pdalink.sh wifi start-android
+./tools/pdalink.sh wifi connect --password 'password-shown-in-android'
+```
+
+Verify both listeners independently, then issue requests through both at the
+same time:
+
+```bash
+curl -fsS -x http://127.0.0.1:18080 https://ifconfig.me/ip &
+curl -fsS -x http://192.168.49.1:8001 https://ifconfig.me/ip &
+wait
+```
+
+Stop only Wi-Fi Direct and prove the USB forward is still healthy:
+
+```bash
+./tools/pdalink.sh wifi stop-android
+./tools/pdalink.sh usb status
+```
 
 Remove the local forward when finished:
 

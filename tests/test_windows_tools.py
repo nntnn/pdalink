@@ -106,6 +106,7 @@ class WindowsToolScriptTest(unittest.TestCase):
         self.assertIn("wifi_usage", wrapper)
         self.assertIn("wifi_start_android", wrapper)
         self.assertIn("START_WIFI_DIRECT", wrapper)
+        self.assertIn("STOP_WIFI_DIRECT", wrapper)
         self.assertIn("wifi-status", wrapper)
         self.assertIn("connect-auto", wrapper)
         self.assertIn("wifi_smoke", wrapper)
@@ -167,12 +168,14 @@ class WindowsToolScriptTest(unittest.TestCase):
         manifest = (ROOT / "android/app/src/main/AndroidManifest.xml").read_text()
 
         self.assertIn("USB_PROXY_CANDIDATE_PORTS = new int[]{8000}", service)
-        self.assertIn("WIFI_PROXY_CANDIDATE_PORTS = new int[]{8000, 8001}", service)
+        self.assertIn("WIFI_PROXY_CANDIDATE_PORTS = new int[]{8001}", service)
+        self.assertIn("HttpProxyServer usbProxyServer", service)
+        self.assertIn("HttpProxyServer wifiProxyServer", service)
         self.assertIn('android:name=".ProxyService"', manifest)
         self.assertIn('android:exported="true"', manifest)
         self.assertIn("USB_HOST = \"127.0.0.1\"", service)
 
-    def test_android_proxy_preserves_mode_and_sanitizes_pac_host(self):
+    def test_android_proxy_preserves_transport_state_and_sanitizes_pac_host(self):
         service = (ROOT / "android/app/src/main/java/dev/pdalink/prototype/ProxyService.java").read_text()
         proxy = (ROOT / "android/app/src/main/java/dev/pdalink/prototype/HttpProxyServer.java").read_text()
         activity = (ROOT / "android/app/src/main/java/dev/pdalink/prototype/MainActivity.java").read_text()
@@ -180,7 +183,16 @@ class WindowsToolScriptTest(unittest.TestCase):
 
         self.assertIn("intent == null ? null : intent.getAction()", service)
         self.assertIn("loadSavedMode()", service)
-        self.assertIn("saveMode(mode)", service)
+        self.assertIn("saveMode(primaryMode)", service)
+        self.assertIn("loadWifiDirectEnabled()", service)
+        self.assertIn("savedMode == Mode.WIFI_DIRECT", service)
+        self.assertIn("saveMode(Mode.USB)", service)
+        self.assertIn("setWifiDirectEnabled(true)", service)
+        self.assertIn("ensureUsbProxyServer()", service)
+        self.assertIn("ensureWifiProxyServer()", service)
+        self.assertIn("clearProxyStartupError(wifiProxyServer)", service)
+        self.assertIn("WIFI_HOST,", service)
+        self.assertIn("clientCount(usbProxyServer) + clientCount(wifiProxyServer)", service)
         self.assertIn("validPacEndpoint(host)", proxy)
         self.assertIn("jsString(endpoint)", proxy)
         self.assertIn("uri.getRawUserInfo() != null", proxy)
@@ -189,7 +201,29 @@ class WindowsToolScriptTest(unittest.TestCase):
         self.assertIn("getUpstreamBytes()", service)
         self.assertIn("getDownstreamBytes()", service)
         self.assertIn("Internet usage:", activity)
+        self.assertIn("USB proxy:", activity)
+        self.assertIn("Wi-Fi Direct proxy:", activity)
+        self.assertIn("ACTION_STOP_WIFI_DIRECT", actions)
         self.assertIn("entry + existing", activity)
+
+    def test_android_wifi_stop_preserves_usb_listener(self):
+        service = (ROOT / "android/app/src/main/java/dev/pdalink/prototype/ProxyService.java").read_text()
+        wrapper = (ROOT / "tools/pdalink.sh").read_text()
+
+        stop_wifi = service[
+            service.index("private void stopWifiDirect()")
+            :service.index("private void startProductUsbBridge()")
+        ]
+        self.assertIn("setWifiDirectEnabled(false)", stop_wifi)
+        self.assertIn("closeWifiProxyServer()", stop_wifi)
+        self.assertNotIn("closeUsbProxyServer()", stop_wifi)
+
+        wrapper_stop = wrapper[
+            wrapper.index("wifi_stop_android()")
+            :wrapper.index("wifi_connect()")
+        ]
+        self.assertIn("dev.pdalink.prototype.STOP_WIFI_DIRECT", wrapper_stop)
+        self.assertNotIn("-a dev.pdalink.prototype.STOP\n", wrapper_stop)
 
     def test_android_declares_product_usb_accessory_consent_surface(self):
         manifest = (ROOT / "android/app/src/main/AndroidManifest.xml").read_text()

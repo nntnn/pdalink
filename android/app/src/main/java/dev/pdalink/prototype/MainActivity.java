@@ -55,7 +55,7 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
         buildUi();
-        appendStatus("Ready. Tap Start USB (default) or Start Wi-Fi Direct.");
+        appendStatus("Ready. USB and Wi-Fi Direct can run together.");
         handleProductUsbIntent(getIntent());
     }
 
@@ -121,13 +121,15 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView hint = new TextView(this);
-        hint.setText("USB starts local-only proxy; Wi-Fi Direct starts a group and proxy.");
+        hint.setText("USB stays on 127.0.0.1:8000; Wi-Fi Direct adds 192.168.49.1:8001.");
         hint.setTextSize(14);
         root.addView(hint);
 
         summaryView = new TextView(this);
         summaryView.setText("Mode: " + ProxyActions.MODE_USB
-                + "\nProxy: not started\nInternet usage: down 0 B / up 0 B\nEgress: unknown\nWi-Fi Direct: not active\nLinux target: not ready");
+                + "\nUSB proxy: not started\nWi-Fi Direct proxy: not started"
+                + "\nInternet usage: down 0 B / up 0 B\nEgress: unknown"
+                + "\nWi-Fi Direct: not active\nUSB target: not ready\nWi-Fi Direct target: not ready");
         summaryView.setTextSize(14);
         summaryView.setTextIsSelectable(true);
         summaryView.setPadding(0, dp(12), 0, 0);
@@ -150,21 +152,32 @@ public class MainActivity extends Activity {
         buttons.addView(startProductUsb, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
         Button startWifi = new Button(this);
-        startWifi.setText("Start Wi-Fi Direct");
+        startWifi.setText("Add Wi-Fi Direct");
         startWifi.setOnClickListener(v -> startWifiDirect());
         buttons.addView(startWifi, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+        root.addView(buttons);
+
+        LinearLayout controls = new LinearLayout(this);
+        controls.setOrientation(LinearLayout.HORIZONTAL);
+        controls.setPadding(0, 0, 0, dp(12));
+
+        Button stopWifi = new Button(this);
+        stopWifi.setText("Stop Wi-Fi Direct");
+        stopWifi.setOnClickListener(v -> sendServiceAction(ProxyActions.ACTION_STOP_WIFI_DIRECT));
+        controls.addView(stopWifi, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
         Button refresh = new Button(this);
         refresh.setText("Refresh");
         refresh.setOnClickListener(v -> sendServiceAction(ProxyActions.ACTION_REFRESH));
-        buttons.addView(refresh, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        controls.addView(refresh, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
         Button stop = new Button(this);
-        stop.setText("Stop");
+        stop.setText("Stop All");
         stop.setOnClickListener(v -> sendServiceAction(ProxyActions.ACTION_STOP));
-        buttons.addView(stop, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        controls.addView(stop, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
-        root.addView(buttons);
+        root.addView(controls);
 
         logView = new TextView(this);
         logView.setTextSize(13);
@@ -363,11 +376,15 @@ public class MainActivity extends Activity {
     private void updateSnapshot(Intent intent) {
         String mode = valueOrDefault(intent.getStringExtra(ProxyActions.EXTRA_MODE), ProxyActions.MODE_USB);
         String proxy = valueOrDefault(intent.getStringExtra(ProxyActions.EXTRA_PROXY_STATUS), "not running");
+        String usbProxy = valueOrDefault(intent.getStringExtra(ProxyActions.EXTRA_USB_PROXY_STATUS), proxy);
+        String wifiProxy = valueOrDefault(intent.getStringExtra(ProxyActions.EXTRA_WIFI_PROXY_STATUS), "not running");
         String egress = valueOrDefault(intent.getStringExtra(ProxyActions.EXTRA_EGRESS), "unknown");
         String ssid = valueOrDefault(intent.getStringExtra(ProxyActions.EXTRA_GROUP_SSID), "not active");
         String passphrase = valueOrDefault(intent.getStringExtra(ProxyActions.EXTRA_GROUP_PASSPHRASE), "");
         String iface = valueOrDefault(intent.getStringExtra(ProxyActions.EXTRA_GROUP_INTERFACE), "");
         String target = valueOrDefault(intent.getStringExtra(ProxyActions.EXTRA_LINUX_TARGET), "not ready");
+        String usbTarget = valueOrDefault(intent.getStringExtra(ProxyActions.EXTRA_USB_TARGET), target);
+        String wifiTarget = valueOrDefault(intent.getStringExtra(ProxyActions.EXTRA_WIFI_TARGET), "not ready");
         String request = valueOrDefault(intent.getStringExtra(ProxyActions.EXTRA_LAST_REQUEST), "none");
         String error = valueOrDefault(intent.getStringExtra(ProxyActions.EXTRA_LAST_ERROR), "none");
         String productUsb = valueOrDefault(intent.getStringExtra(ProxyActions.EXTRA_PRODUCT_USB_STATUS), "permission missing");
@@ -376,7 +393,7 @@ public class MainActivity extends Activity {
         long downBytes = intent.getLongExtra(ProxyActions.EXTRA_TRAFFIC_DOWN_BYTES, 0L);
 
         String wifi = "not active";
-        if (ProxyActions.MODE_WIFI_DIRECT.equals(mode)) {
+        if (mode.contains(ProxyActions.MODE_WIFI_DIRECT)) {
             wifi = ssid;
             if (!passphrase.isEmpty()) {
                 wifi += " / password " + passphrase;
@@ -387,12 +404,15 @@ public class MainActivity extends Activity {
         }
 
         summaryView.setText("Mode: " + mode
-                + "\nProxy: " + proxy + " / clients " + clients
+                + "\nUSB proxy: " + usbProxy
+                + "\nWi-Fi Direct proxy: " + wifiProxy
+                + "\nActive proxy clients: " + clients
                 + "\nInternet usage: down " + formatBytes(downBytes) + " / up " + formatBytes(upBytes)
                 + "\nEgress: " + egress
                 + "\nProduct USB: " + productUsb
                 + "\nWi-Fi Direct: " + wifi
-                + "\nLinux target: " + target
+                + "\nUSB target: " + usbTarget
+                + "\nWi-Fi Direct target: " + wifiTarget
                 + "\nLast request: " + request
                 + "\nLast error: " + error);
     }

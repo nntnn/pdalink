@@ -308,10 +308,10 @@ wifi_stop_android() {
         ;;
     esac
   fi
-  log "Stopping Android proxy"
+  log "Stopping Android Wi-Fi Direct proxy"
   run "$ADB" shell am start-foreground-service \
     -n dev.pdalink.prototype/.ProxyService \
-    -a dev.pdalink.prototype.STOP
+    -a dev.pdalink.prototype.STOP_WIFI_DIRECT
 }
 
 wifi_connect() {

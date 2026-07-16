@@ -10,9 +10,10 @@
   이미 있다.
 - Wi-Fi Direct mode는 Android가 group owner를 만들고, Linux target을
   `http://192.168.49.1:<port>`로 표시한다.
-- Android Wi-Fi Direct proxy candidate port는 현재 `8000,8001`이다.
-- USB/Product USB mode와 Wi-Fi Direct mode는 Android service level에서 이미
-  분리되어 있다.
+- Android Wi-Fi Direct proxy port는 `8001`이고 P2P group-owner 주소
+  `192.168.49.1`에 bind한다. ADB USB는 `127.0.0.1:8000`을 유지한다.
+- USB/Product USB와 Wi-Fi Direct listener/lifecycle은 분리되어 있어 두 데이터
+  경로를 동시에 사용할 수 있다. `STOP_WIFI_DIRECT`는 USB listener를 보존한다.
 - Android runtime permission 요청도 mode별로 갈라져 있다. USB는 notification
   권한만, Wi-Fi Direct는 Android 버전에 따라 `NEARBY_WIFI_DEVICES` 또는
   `ACCESS_FINE_LOCATION`을 요청한다.

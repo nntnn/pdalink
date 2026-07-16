@@ -26,16 +26,17 @@ public class ProxyService extends Service {
     private static final int NOTIFICATION_ID = 77;
     private static final String PREFS_NAME = "pdalink_proxy";
     private static final String PREF_MODE = "mode";
+    private static final String PREF_WIFI_DIRECT_ENABLED = "wifi_direct_enabled";
     private static final String WIFI_HOST = "192.168.49.1";
     private static final String WIFI_DIRECT_CLIENT_PREFIX = "192.168.49.";
     private static final String USB_HOST = "127.0.0.1";
     private static final int[] USB_PROXY_CANDIDATE_PORTS = new int[]{8000};
-    private static final int[] WIFI_PROXY_CANDIDATE_PORTS = new int[]{8000, 8001};
+    private static final int[] WIFI_PROXY_CANDIDATE_PORTS = new int[]{8001};
 
     private enum Mode {USB, PRODUCT_USB, WIFI_DIRECT}
 
-    private HttpProxyServer proxyServer;
-    private Mode proxyMode;
+    private volatile HttpProxyServer usbProxyServer;
+    private volatile HttpProxyServer wifiProxyServer;
     private NetworkSelector networkSelector;
     private WifiP2pManager wifiP2pManager;
     private WifiP2pManager.Channel wifiP2pChannel;
@@ -43,6 +44,7 @@ public class ProxyService extends Service {
     private Handler mainHandler;
     private ProductUsbBridge productUsbBridge;
     private Mode currentMode = Mode.USB;
+    private boolean wifiDirectEnabled;
     private String groupSsid = "";
     private String groupPassphrase = "";
     private String groupInterface = "";
@@ -56,7 +58,15 @@ public class ProxyService extends Service {
         createNotificationChannel();
         startForegroundCompat("PdaLink starting");
         mainHandler = new Handler(getMainLooper());
-        currentMode = loadSavedMode();
+        Mode savedMode = loadSavedMode();
+        if (savedMode == Mode.WIFI_DIRECT) {
+            currentMode = Mode.USB;
+            setWifiDirectEnabled(true);
+            saveMode(Mode.USB);
+        } else {
+            currentMode = savedMode;
+            wifiDirectEnabled = loadWifiDirectEnabled();
+        }
         networkSelector = new NetworkSelector(this, this::status);
         networkSelector.start();
     }
@@ -65,23 +75,29 @@ public class ProxyService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? null : intent.getAction();
         if (ProxyActions.ACTION_STOP.equals(action)) {
+            setWifiDirectEnabled(false);
             status("Stopping service");
             stopSelf();
             return START_NOT_STICKY;
         }
+        if (ProxyActions.ACTION_STOP_WIFI_DIRECT.equals(action)) {
+            ensureUsbProxyServer();
+            stopWifiDirect();
+            status("Wi-Fi Direct stopped; USB proxy remains active");
+            updateNotification();
+            return START_STICKY;
+        }
 
         Mode requestedMode = parseMode(action);
         if (ProxyActions.ACTION_REFRESH.equals(action)) {
-            if (currentMode == null) {
-                currentMode = Mode.USB;
-            }
-            ensureProxyServer(currentMode);
-            if (currentMode == Mode.WIFI_DIRECT) {
+            ensureUsbProxyServer();
+            if (wifiDirectEnabled) {
+                setupWifiP2p();
                 requestGroupInfo();
             } else {
-                status("Wi-Fi Direct status not tracked in USB mode");
+                status("Wi-Fi Direct not active");
             }
-            status("Proxy: " + proxySummary());
+            status("Proxies: " + proxySummary());
             updateNotification();
             return START_STICKY;
         }
@@ -89,36 +105,39 @@ public class ProxyService extends Service {
             requestedMode = currentMode == null ? loadSavedMode() : currentMode;
         }
 
-        setMode(requestedMode);
-        ensureProxyServer(currentMode);
-        if (currentMode == Mode.WIFI_DIRECT) {
+        if (requestedMode == Mode.WIFI_DIRECT) {
+            setWifiDirectEnabled(true);
+        } else {
+            setPrimaryMode(requestedMode);
+        }
+
+        ensureUsbProxyServer();
+        if (wifiDirectEnabled) {
             setupWifiP2p();
             createGroup();
-        } else {
-            clearWifiStateForUsbMode();
-            if (currentMode == Mode.PRODUCT_USB) {
-                productUsbStatus = "permission granted; opening bridge";
-                startProductUsbBridge();
-            } else {
-                closeProductUsbBridge(true);
-            }
         }
-        status("Mode " + modeLabel() + " active");
+        if (currentMode == Mode.PRODUCT_USB) {
+            productUsbStatus = "permission granted; opening bridge";
+            startProductUsbBridge();
+        } else {
+            closeProductUsbBridge(true);
+        }
+        status("Transports " + modeLabel() + " active");
         updateNotification();
         return START_STICKY;
     }
 
     @Override
     public void onDestroy() {
-        if (currentMode == Mode.WIFI_DIRECT && wifiP2pManager != null && wifiP2pChannel != null) {
+        if (mainHandler != null) {
+            mainHandler.removeCallbacksAndMessages(null);
+        }
+        if (wifiP2pManager != null && wifiP2pChannel != null) {
             removeWifiGroupBestEffort();
         }
         clearWifiReceiver();
-        if (proxyServer != null) {
-            proxyServer.close();
-            proxyServer = null;
-            proxyMode = null;
-        }
+        closeWifiProxyServer();
+        closeUsbProxyServer();
         closeProductUsbBridge();
         if (networkSelector != null) {
             networkSelector.close();
@@ -132,51 +151,69 @@ public class ProxyService extends Service {
         return null;
     }
 
-    private void setMode(Mode mode) {
-        if (currentMode == mode && proxyServer != null && proxyServer.isRunning() && proxyMode == mode) {
-            return;
-        }
-        if (proxyServer != null && proxyMode != mode) {
-            proxyServer.close();
-            proxyServer = null;
-            proxyMode = null;
-        }
-        if (currentMode == Mode.PRODUCT_USB && mode != Mode.PRODUCT_USB) {
+    private void setPrimaryMode(Mode mode) {
+        Mode primaryMode = mode == Mode.PRODUCT_USB ? Mode.PRODUCT_USB : Mode.USB;
+        if (currentMode == Mode.PRODUCT_USB && primaryMode != Mode.PRODUCT_USB) {
             closeProductUsbBridge(true);
         }
-        if (currentMode != mode && currentMode == Mode.WIFI_DIRECT) {
-            removeWifiGroupBestEffort();
-            clearWifiReceiver();
-        }
-        currentMode = mode;
-        saveMode(mode);
-        clearGroupInfo();
+        currentMode = primaryMode;
+        saveMode(primaryMode);
     }
 
-    private void ensureProxyServer(Mode mode) {
-        if (proxyServer != null && proxyServer.isRunning() && proxyMode == mode) {
+    private void ensureUsbProxyServer() {
+        if (usbProxyServer != null && usbProxyServer.isRunning()) {
             return;
         }
-        if (proxyServer != null) {
-            proxyServer.close();
-        }
-        int[] candidatePorts = mode == Mode.WIFI_DIRECT ? WIFI_PROXY_CANDIDATE_PORTS : USB_PROXY_CANDIDATE_PORTS;
-        String bindAddress = mode == Mode.WIFI_DIRECT ? null : USB_HOST;
-        String allowedClientPrefix = mode == Mode.WIFI_DIRECT ? WIFI_DIRECT_CLIENT_PREFIX : "";
-        proxyServer = new HttpProxyServer(
+        closeUsbProxyServer();
+        usbProxyServer = new HttpProxyServer(
                 this,
-                bindAddress,
-                allowedClientPrefix,
-                candidatePorts,
+                USB_HOST,
+                USB_PROXY_CANDIDATE_PORTS,
                 host -> networkSelector.openSocket(host.host, host.port),
                 this::status);
-        proxyMode = mode;
-        proxyServer.start();
-        status("Proxy: " + proxySummary());
+        usbProxyServer.start();
+        clearProxyStartupError(usbProxyServer);
+        status("USB proxy: " + usbProxySummary());
+    }
+
+    private void ensureWifiProxyServer() {
+        if (!wifiDirectEnabled || groupSsid.isEmpty()) {
+            return;
+        }
+        if (wifiProxyServer != null && wifiProxyServer.isRunning()) {
+            return;
+        }
+        closeWifiProxyServer();
+        wifiProxyServer = new HttpProxyServer(
+                this,
+                WIFI_HOST,
+                WIFI_DIRECT_CLIENT_PREFIX,
+                WIFI_PROXY_CANDIDATE_PORTS,
+                host -> networkSelector.openSocket(host.host, host.port),
+                this::status);
+        wifiProxyServer.start();
+        clearProxyStartupError(wifiProxyServer);
+        status("Wi-Fi Direct proxy: " + wifiProxySummary());
+    }
+
+    private void closeUsbProxyServer() {
+        HttpProxyServer server = usbProxyServer;
+        usbProxyServer = null;
+        if (server != null) {
+            server.close();
+        }
+    }
+
+    private void closeWifiProxyServer() {
+        HttpProxyServer server = wifiProxyServer;
+        wifiProxyServer = null;
+        if (server != null) {
+            server.close();
+        }
     }
 
     private void setupWifiP2p() {
-        if (currentMode != Mode.WIFI_DIRECT) {
+        if (!wifiDirectEnabled) {
             return;
         }
         if (wifiP2pManager != null && wifiP2pChannel != null && p2pReceiver != null) {
@@ -233,14 +270,17 @@ public class ProxyService extends Service {
         }
     }
 
-    private void clearWifiStateForUsbMode() {
+    private void stopWifiDirect() {
+        setWifiDirectEnabled(false);
+        removeWifiGroupBestEffort();
         clearWifiReceiver();
+        closeWifiProxyServer();
         clearGroupInfo();
     }
 
     private void startProductUsbBridge() {
         closeProductUsbBridge();
-        int port = proxyPort();
+        int port = usbProxyPort();
         if (port <= 0) {
             productUsbStatus = "proxy unavailable";
             status("Product USB bridge waiting for proxy port.");
@@ -284,7 +324,14 @@ public class ProxyService extends Service {
         groupInterface = "";
     }
 
+    private String valueOrEmpty(String value) {
+        return value == null ? "" : value;
+    }
+
     private void createGroup() {
+        if (!wifiDirectEnabled) {
+            return;
+        }
         if (wifiP2pManager == null || wifiP2pChannel == null) {
             setupWifiP2p();
         }
@@ -308,6 +355,9 @@ public class ProxyService extends Service {
     }
 
     private void createGroupInternal(boolean retryAfterBusy) {
+        if (!wifiDirectEnabled || wifiP2pManager == null || wifiP2pChannel == null) {
+            return;
+        }
         try {
             wifiP2pManager.createGroup(wifiP2pChannel, new SimpleActionListener("createGroup") {
                 @Override
@@ -374,7 +424,11 @@ public class ProxyService extends Service {
     }
 
     private void retryCreateGroupOnce() {
-        mainHandler.postDelayed(() -> createGroupInternal(false), 1000);
+        mainHandler.postDelayed(() -> {
+            if (wifiDirectEnabled) {
+                createGroupInternal(false);
+            }
+        }, 1000);
     }
 
     private void requestGroupInfo() {
@@ -389,23 +443,30 @@ public class ProxyService extends Service {
     }
 
     private void publishGroupInfo(WifiP2pGroup group) {
-        if (currentMode != Mode.WIFI_DIRECT) {
+        if (!wifiDirectEnabled) {
             clearGroupInfo();
             return;
         }
         if (group == null) {
+            closeWifiProxyServer();
             clearGroupInfo();
             status("Wi-Fi Direct group not active yet");
             updateNotification();
             return;
         }
-        groupSsid = group.getNetworkName();
-        groupPassphrase = group.getPassphrase();
-        groupInterface = group.getInterface();
-        status("Group SSID: " + group.getNetworkName());
+        groupSsid = valueOrEmpty(group.getNetworkName());
+        groupPassphrase = valueOrEmpty(group.getPassphrase());
+        groupInterface = valueOrEmpty(group.getInterface());
+        if (groupSsid.isEmpty()) {
+            closeWifiProxyServer();
+            status("Wi-Fi Direct group missing network name");
+            return;
+        }
+        ensureWifiProxyServer();
+        status("Group SSID: " + groupSsid);
         status("Group password: available in app summary");
-        status("Group interface: " + group.getInterface());
-        status("Linux proxy target: " + linuxTarget());
+        status("Group interface: " + groupInterface);
+        status("Wi-Fi Direct proxy target: " + wifiTarget());
         updateNotification();
     }
 
@@ -414,7 +475,7 @@ public class ProxyService extends Service {
     }
 
     private String buildNotificationText() {
-        return modeLabel() + ": proxy " + linuxTarget() + " egress " + egressSummary();
+        return modeLabel() + ": " + proxySummary() + " egress " + egressSummary();
     }
 
     private String egressSummary() {
@@ -450,56 +511,122 @@ public class ProxyService extends Service {
         }
     }
 
+    private void clearProxyStartupError(HttpProxyServer server) {
+        if (server == null || !server.isRunning()) {
+            return;
+        }
+        if (lastError.startsWith("Port ") || "No proxy port available".equals(lastError)) {
+            lastError = "";
+        }
+    }
+
     private void putSnapshotExtras(Intent intent) {
         intent.putExtra(ProxyActions.EXTRA_MODE, modeLabel());
         intent.putExtra(ProxyActions.EXTRA_PROXY_STATUS, proxySummary());
-        intent.putExtra(ProxyActions.EXTRA_PROXY_PORT, proxyPort());
+        intent.putExtra(ProxyActions.EXTRA_PROXY_PORT, usbProxyPort());
+        intent.putExtra(ProxyActions.EXTRA_USB_PROXY_STATUS, usbProxySummary());
+        intent.putExtra(ProxyActions.EXTRA_WIFI_PROXY_STATUS, wifiProxySummary());
         intent.putExtra(ProxyActions.EXTRA_EGRESS, egressSummary());
         intent.putExtra(ProxyActions.EXTRA_GROUP_SSID, groupSsid);
         intent.putExtra(ProxyActions.EXTRA_GROUP_PASSPHRASE, groupPassphrase);
         intent.putExtra(ProxyActions.EXTRA_GROUP_INTERFACE, groupInterface);
         intent.putExtra(ProxyActions.EXTRA_LINUX_TARGET, linuxTarget());
+        intent.putExtra(ProxyActions.EXTRA_USB_TARGET, usbTarget());
+        intent.putExtra(ProxyActions.EXTRA_WIFI_TARGET, wifiTarget());
         intent.putExtra(ProxyActions.EXTRA_LAST_REQUEST, latestRequest());
         intent.putExtra(ProxyActions.EXTRA_LAST_ERROR, lastError);
         intent.putExtra(ProxyActions.EXTRA_PRODUCT_USB_STATUS, productUsbStatus);
-        intent.putExtra(ProxyActions.EXTRA_CLIENT_COUNT, proxyServer == null ? 0 : proxyServer.getClientCount());
-        intent.putExtra(ProxyActions.EXTRA_TRAFFIC_UP_BYTES, proxyServer == null ? 0L : proxyServer.getUpstreamBytes());
-        intent.putExtra(ProxyActions.EXTRA_TRAFFIC_DOWN_BYTES, proxyServer == null ? 0L : proxyServer.getDownstreamBytes());
+        intent.putExtra(ProxyActions.EXTRA_CLIENT_COUNT,
+                clientCount(usbProxyServer) + clientCount(wifiProxyServer));
+        intent.putExtra(ProxyActions.EXTRA_TRAFFIC_UP_BYTES,
+                upstreamBytes(usbProxyServer) + upstreamBytes(wifiProxyServer));
+        intent.putExtra(ProxyActions.EXTRA_TRAFFIC_DOWN_BYTES,
+                downstreamBytes(usbProxyServer) + downstreamBytes(wifiProxyServer));
     }
 
     private String proxySummary() {
-        return proxyServer == null ? "not running" : proxyServer.listenSummary();
+        return "USB " + usbProxySummary() + "; Wi-Fi Direct " + wifiProxySummary();
     }
 
-    private int proxyPort() {
-        return proxyServer == null ? -1 : proxyServer.getPort();
+    private String usbProxySummary() {
+        HttpProxyServer server = usbProxyServer;
+        return server == null ? "not running" : server.listenSummary();
+    }
+
+    private String wifiProxySummary() {
+        HttpProxyServer server = wifiProxyServer;
+        return server == null ? "not running" : server.listenSummary();
+    }
+
+    private int usbProxyPort() {
+        HttpProxyServer server = usbProxyServer;
+        return server == null ? -1 : server.getPort();
+    }
+
+    private int wifiProxyPort() {
+        HttpProxyServer server = wifiProxyServer;
+        return server == null ? -1 : server.getPort();
     }
 
     private String modeLabel() {
-        if (currentMode == Mode.WIFI_DIRECT) {
-            return ProxyActions.MODE_WIFI_DIRECT;
+        String primaryMode;
+        if (currentMode == Mode.PRODUCT_USB) {
+            primaryMode = ProxyActions.MODE_PRODUCT_USB;
+        } else {
+            primaryMode = ProxyActions.MODE_USB;
+        }
+        if (!wifiDirectEnabled) {
+            return primaryMode;
         }
         if (currentMode == Mode.PRODUCT_USB) {
-            return ProxyActions.MODE_PRODUCT_USB;
+            return primaryMode + " + " + ProxyActions.MODE_WIFI_DIRECT;
         }
-        return ProxyActions.MODE_USB;
+        return ProxyActions.MODE_USB_WIFI_DIRECT;
     }
 
     private String linuxTarget() {
-        int port = proxyPort();
-        if (port <= 0) {
-            return "not ready";
+        if (wifiDirectEnabled) {
+            return wifiTarget();
         }
         if (currentMode == Mode.PRODUCT_USB) {
             return "product-usb://proxy";
         }
-        String host = currentMode == Mode.WIFI_DIRECT ? WIFI_HOST : USB_HOST;
-        return "http://" + host + ":" + port;
+        return usbTarget();
+    }
+
+    private String usbTarget() {
+        int port = usbProxyPort();
+        return port <= 0 ? "not ready" : "http://" + USB_HOST + ":" + port;
+    }
+
+    private String wifiTarget() {
+        int port = wifiProxyPort();
+        return port <= 0 ? "not ready" : "http://" + WIFI_HOST + ":" + port;
     }
 
     private String latestRequest() {
-        String fromProxy = proxyServer == null ? "" : proxyServer.getLastRequest();
-        return fromProxy.isEmpty() ? lastRequest : fromProxy;
+        if (!lastRequest.isEmpty()) {
+            return lastRequest;
+        }
+        HttpProxyServer wifiServer = wifiProxyServer;
+        String wifiRequest = wifiServer == null ? "" : wifiServer.getLastRequest();
+        if (!wifiRequest.isEmpty()) {
+            return wifiRequest;
+        }
+        HttpProxyServer usbServer = usbProxyServer;
+        return usbServer == null ? "" : usbServer.getLastRequest();
+    }
+
+    private int clientCount(HttpProxyServer server) {
+        return server == null ? 0 : server.getClientCount();
+    }
+
+    private long upstreamBytes(HttpProxyServer server) {
+        return server == null ? 0L : server.getUpstreamBytes();
+    }
+
+    private long downstreamBytes(HttpProxyServer server) {
+        return server == null ? 0L : server.getDownstreamBytes();
     }
 
     private Mode parseMode(String action) {
@@ -529,6 +656,23 @@ public class ProxyService extends Service {
         getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
                 .edit()
                 .putString(PREF_MODE, mode.name())
+                .apply();
+    }
+
+    private boolean loadWifiDirectEnabled() {
+        return getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .getBoolean(PREF_WIFI_DIRECT_ENABLED, false);
+    }
+
+    private void setWifiDirectEnabled(boolean enabled) {
+        wifiDirectEnabled = enabled;
+        saveWifiDirectEnabled(enabled);
+    }
+
+    private void saveWifiDirectEnabled(boolean enabled) {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .edit()
+                .putBoolean(PREF_WIFI_DIRECT_ENABLED, enabled)
                 .apply();
     }
 

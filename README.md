@@ -25,8 +25,8 @@ Start with:
 
 Prototype layout:
 
-- `android/`: Android app that creates a Wi-Fi Direct group and serves an
-  HTTP/HTTPS proxy on `8000` or `8001`.
+- `android/`: Android app that serves the ADB USB proxy on loopback port `8000`
+  and can concurrently serve Wi-Fi Direct on `192.168.49.1:8001`.
 - `linux/`: Python helper for NetworkManager connection, proxy probing, and
   curl-based smoke tests, including an ADB USB-forward proxy mode and an
   experimental TUN/system-routing control plane.
@@ -77,7 +77,19 @@ helper directly:
 ./tools/pdalink.sh wifi connect --password 'password-shown-in-android'
 ./tools/pdalink.sh wifi status
 ./tools/pdalink.sh wifi test
+./tools/pdalink.sh wifi stop-android
 ```
+
+Starting Wi-Fi Direct is additive: the Android USB proxy remains on
+`127.0.0.1:8000` for existing ADB forwards while the Direct proxy listens on
+`192.168.49.1:8001`. `wifi stop-android` removes only the Direct group and
+listener; it does not stop the USB proxy. Use the app's `Stop All` action or the
+full Android `STOP` action only when both transports should stop.
+
+On phones that cannot run hotspot and Wi-Fi Direct together, use the hotspot
+only as the APK-install safety path. Restore and verify USB first, then turn the
+hotspot off before `wifi start-android`; the USB route keeps the laptop online
+while it joins the `DIRECT-*` network.
 
 `wifi connect` marks the NetworkManager profile as local-only
 (`never-default`, ignored auto DNS, IPv6 ignored, no autoconnect) so an active
