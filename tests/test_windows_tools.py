@@ -102,7 +102,12 @@ class WindowsToolScriptTest(unittest.TestCase):
     def test_wrapper_exposes_wifi_direct_commands(self):
         wrapper = (ROOT / "tools" / "pdalink.sh").read_text()
 
-        self.assertIn("wifi {start-android|stop-android|scan|connect|status|probe|env|curl-test|test|smoke|doctor}", wrapper)
+        self.assertIn(
+            "wifi {start-android|stop-android|scan|connect|status|internet|probe|env|curl-test|test|smoke|doctor}",
+            wrapper,
+        )
+        self.assertIn("wifi internet start", wrapper)
+        self.assertIn("wifi internet stop", wrapper)
         self.assertIn("wifi_usage", wrapper)
         self.assertIn("wifi_start_android", wrapper)
         self.assertIn("START_WIFI_DIRECT", wrapper)

@@ -80,6 +80,24 @@ helper directly:
 ./tools/pdalink.sh wifi stop-android
 ```
 
+On Linux desktops using NetworkManager and GNOME, one managed command can join
+the Direct group and apply the PdaLink PAC for proxy-aware desktop apps:
+
+```bash
+./tools/pdalink.sh wifi internet start --password 'password-shown-in-android'
+./tools/pdalink.sh wifi internet status
+./tools/pdalink.sh wifi internet test
+./tools/pdalink.sh wifi internet stop
+```
+
+`wifi internet start` verifies the Direct route and PAC before changing GNOME
+settings. It saves the previous effective proxy values in a user-private state
+file and restores them on `stop`. If the proxy is changed by another tool while
+PdaLink is active, normal stop refuses to overwrite that newer setting; use
+`--force` only for deliberate snapshot recovery. Pass `--keep-wifi` to restore
+the proxy without disconnecting a Direct connection created by the command.
+Non-GNOME desktops can continue to use `wifi env --probe`.
+
 Starting Wi-Fi Direct is additive: the Android USB proxy remains on
 `127.0.0.1:8000` for existing ADB forwards while the Direct proxy listens on
 `192.168.49.1:8001`. `wifi stop-android` removes only the Direct group and
@@ -102,6 +120,10 @@ If Ubuntu repeatedly prompts for the Wi-Fi password, the saved passphrase is
 probably stale. Start Wi-Fi Direct again on Android, copy the current password
 shown in the app, and rerun `./tools/pdalink.sh wifi connect --password '...'`;
 the wrapper updates the saved NetworkManager secret before reconnecting.
+
+The cross-platform host contract and the planned Windows/macOS native helpers
+are tracked in `docs/HOST_AUTOMATION_PLAN.md`. Until their real-host smoke tests
+pass, Windows and macOS Wi-Fi Direct proxy setup remains manual.
 
 For a USB-debugging-only prototype path, forward the Android proxy to localhost
 and curl through USB:

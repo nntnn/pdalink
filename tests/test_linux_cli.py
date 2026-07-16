@@ -50,6 +50,27 @@ class LinuxCliTest(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("PAC proxy line not found", result.detail)
 
+    def test_expected_pdalink_pac_rejects_different_advertised_proxy(self):
+        pac = 'function FindProxyForURL(url, host) { return "PROXY 10.0.0.1:8888; DIRECT"; }'
+        with mock.patch.object(pdalink_lite, "request_pac", return_value=pac):
+            state, detail = pdalink_lite.expected_pdalink_pac_status("192.168.49.1", 8001)
+
+        self.assertEqual(state, "untrusted")
+        self.assertIn("expected 192.168.49.1:8001", detail)
+
+    def test_first_verified_pdalink_port_skips_untrusted_listener(self):
+        with mock.patch.object(pdalink_lite, "route_info", return_value=pdalink_lite.RouteInfo(
+            "192.168.49.1 dev wlp1s0 src 192.168.49.2",
+            dev="wlp1s0",
+            src="192.168.49.2",
+        )), mock.patch.object(pdalink_lite, "expected_pdalink_pac_status", side_effect=[
+            ("untrusted", "wrong proxy"),
+            ("active", "expected proxy"),
+        ]):
+            port = pdalink_lite.first_verified_pdalink_port("192.168.49.1", (8000, 8001))
+
+        self.assertEqual(port, 8001)
+
     def test_parse_route_info(self):
         route = pdalink_lite.parse_route_info(
             "192.168.49.1 dev wlp62s0 src 192.168.49.243 uid 1000 cache"
@@ -177,6 +198,183 @@ class LinuxCliTest(unittest.TestCase):
 
         self.assertEqual(commands, [["connection", "up", "pdalink-wifi-direct", "ifname", "wlp1s0"]])
         configure.assert_not_called()
+
+    def test_enable_gnome_wifi_proxy_snapshots_then_applies_pac(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "wifi-proxy.json"
+            writes = []
+            with mock.patch.object(pdalink_lite, "gnome_proxy_snapshot", return_value={
+                "mode": "'none'",
+                "autoconfig-url": "''",
+            }), mock.patch.object(pdalink_lite, "gsettings_set", side_effect=lambda key, value: writes.append((key, value))), \
+                    mock.patch.object(pdalink_lite, "gnome_proxy_owned_by_pdalink", return_value=True):
+                pdalink_lite.enable_gnome_wifi_proxy(
+                    state_path=state_path,
+                    pac_url="http://192.168.49.1:8001/proxy.pac",
+                    ssid="DIRECT-PD-S21",
+                    profile_name="pdalink-wifi-direct",
+                    disconnect_on_stop=True,
+                )
+
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(state["before"]["mode"], "'none'")
+            self.assertEqual(state["pac_url"], "http://192.168.49.1:8001/proxy.pac")
+            self.assertNotIn("password", state)
+            self.assertEqual(state_path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(writes, [
+                ("autoconfig-url", "'http://192.168.49.1:8001/proxy.pac'"),
+                ("mode", "'auto'"),
+            ])
+
+    def test_enable_gnome_wifi_proxy_rolls_back_failed_apply(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "wifi-proxy.json"
+            before = {"mode": "'manual'", "autoconfig-url": "'https://old/pac'"}
+            with mock.patch.object(pdalink_lite, "gnome_proxy_snapshot", return_value=before), \
+                    mock.patch.object(pdalink_lite, "gsettings_set", side_effect=[None, RuntimeError("set failed")]), \
+                    mock.patch.object(pdalink_lite, "restore_gnome_proxy") as restore:
+                with self.assertRaisesRegex(RuntimeError, "set failed"):
+                    pdalink_lite.enable_gnome_wifi_proxy(
+                        state_path=state_path,
+                        pac_url="http://192.168.49.1:8001/proxy.pac",
+                        ssid="DIRECT-PD-S21",
+                        profile_name="pdalink-wifi-direct",
+                        disconnect_on_stop=True,
+                    )
+
+            restore.assert_called_once_with(before)
+            self.assertFalse(state_path.exists())
+
+    def test_enable_gnome_wifi_proxy_keeps_state_when_rollback_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "wifi-proxy.json"
+            before = {"mode": "'manual'", "autoconfig-url": "'https://old/pac'"}
+            with mock.patch.object(pdalink_lite, "gnome_proxy_snapshot", return_value=before), \
+                    mock.patch.object(pdalink_lite, "gsettings_set", side_effect=RuntimeError("apply failed")), \
+                    mock.patch.object(pdalink_lite, "restore_gnome_proxy", side_effect=RuntimeError("restore failed")):
+                with self.assertRaisesRegex(RuntimeError, "Restore state retained"):
+                    pdalink_lite.enable_gnome_wifi_proxy(
+                        state_path=state_path,
+                        pac_url="http://192.168.49.1:8001/proxy.pac",
+                        ssid="DIRECT-PD-S21",
+                        profile_name="pdalink-wifi-direct",
+                        disconnect_on_stop=True,
+                    )
+
+            self.assertTrue(state_path.exists())
+
+    def test_create_private_json_does_not_overwrite_existing_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "wifi-proxy.json"
+            state_path.write_text('{"owner": "first"}\n', encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "already exists"):
+                pdalink_lite.create_private_json(state_path, {"owner": "second"})
+
+            self.assertEqual(json.loads(state_path.read_text(encoding="utf-8")), {"owner": "first"})
+
+    def test_create_private_json_reports_storage_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.json"
+            with mock.patch.object(pdalink_lite.os, "open", side_effect=PermissionError("denied")):
+                with self.assertRaisesRegex(RuntimeError, "cannot create Wi-Fi Direct proxy state"):
+                    pdalink_lite.create_private_json(state_path, {"owner": "pdalink"})
+
+    def test_wifi_proxy_start_lock_refuses_concurrent_holder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "wifi-proxy.json"
+            first_fd = pdalink_lite.acquire_wifi_proxy_start_lock(state_path)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "already running"):
+                    pdalink_lite.acquire_wifi_proxy_start_lock(state_path)
+            finally:
+                os.close(first_fd)
+
+            second_fd = pdalink_lite.acquire_wifi_proxy_start_lock(state_path)
+            os.close(second_fd)
+
+    def test_load_wifi_proxy_state_rejects_unexpected_owner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "wifi-proxy.json"
+            pdalink_lite.atomic_write_json(state_path, {
+                "version": 1,
+                "transport": "wifi-direct",
+                "manager": "other-tool",
+                "pac_url": "http://192.168.49.1:8001/proxy.pac",
+                "profile_name": "pdalink-wifi-direct",
+                "disconnect_on_stop": True,
+                "before": {"mode": "'none'", "autoconfig-url": "''"},
+            })
+
+            with self.assertRaisesRegex(ValueError, "unexpected owner"):
+                pdalink_lite.load_wifi_proxy_state(state_path)
+
+    def test_wifi_internet_start_refuses_existing_restore_state_before_connect(self):
+        args = argparse.Namespace(
+            state_file="",
+            ssid=None,
+            password="secret123",
+            iface=None,
+            ssid_pattern="DIRECT-",
+            verify_timeout=1,
+            host="192.168.49.1",
+            ports="8000,8001",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "wifi-proxy.json"
+            state_path.write_text("{}", encoding="utf-8")
+            args.state_file = str(state_path)
+            with mock.patch.object(pdalink_lite, "connect_auto") as connect_auto, redirect_stderr(io.StringIO()):
+                self.assertEqual(pdalink_lite.wifi_internet_start(args), 2)
+
+        connect_auto.assert_not_called()
+
+    def test_wifi_internet_stop_refuses_proxy_drift(self):
+        args = argparse.Namespace(state_file="", force=False, keep_wifi=False)
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "wifi-proxy.json"
+            args.state_file = str(state_path)
+            pdalink_lite.atomic_write_json(state_path, {
+                "version": 1,
+                "transport": "wifi-direct",
+                "manager": "gsettings",
+                "pac_url": "http://192.168.49.1:8001/proxy.pac",
+                "profile_name": "pdalink-wifi-direct",
+                "disconnect_on_stop": True,
+                "before": {"mode": "'none'", "autoconfig-url": "''"},
+            })
+            with mock.patch.object(pdalink_lite, "gnome_proxy_owned_by_pdalink", return_value=False), \
+                    mock.patch.object(pdalink_lite, "restore_gnome_proxy") as restore, \
+                    redirect_stderr(io.StringIO()):
+                self.assertEqual(pdalink_lite.wifi_internet_stop(args), 2)
+
+            restore.assert_not_called()
+            self.assertTrue(state_path.exists())
+
+    def test_wifi_internet_stop_restores_and_disconnects_owned_connection(self):
+        args = argparse.Namespace(state_file="", force=False, keep_wifi=False)
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "wifi-proxy.json"
+            args.state_file = str(state_path)
+            before = {"mode": "'none'", "autoconfig-url": "''"}
+            pdalink_lite.atomic_write_json(state_path, {
+                "version": 1,
+                "transport": "wifi-direct",
+                "manager": "gsettings",
+                "pac_url": "http://192.168.49.1:8001/proxy.pac",
+                "profile_name": "pdalink-wifi-direct",
+                "disconnect_on_stop": True,
+                "before": before,
+            })
+            with mock.patch.object(pdalink_lite, "gnome_proxy_owned_by_pdalink", return_value=True), \
+                    mock.patch.object(pdalink_lite, "restore_gnome_proxy") as restore, \
+                    mock.patch.object(pdalink_lite, "disconnect_wifi_profile", return_value=True) as disconnect, \
+                    redirect_stdout(io.StringIO()):
+                self.assertEqual(pdalink_lite.wifi_internet_stop(args), 0)
+
+            restore.assert_called_once_with(before)
+            disconnect.assert_called_once_with("pdalink-wifi-direct")
+            self.assertFalse(state_path.exists())
 
     def test_configure_wifi_direct_profile_marks_connection_local_only(self):
         commands = []

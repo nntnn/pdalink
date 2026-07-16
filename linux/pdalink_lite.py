@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import ast
+import fcntl
 import ipaddress
 import json
 import os
@@ -65,6 +67,9 @@ WIFI_DIRECT_TRANSPORT_ROLE = "manual"
 WIFI_DIRECT_TRANSPORT_LINE = f"transport: {WIFI_DIRECT_TRANSPORT_NAME} ({WIFI_DIRECT_TRANSPORT_ROLE})"
 DEFAULT_PRODUCT_USB_STATE_FILE = "product-usb.json"
 PRODUCT_USB_STATE_MAX_AGE_SECONDS = int(os.getenv("PDALINK_PRODUCT_USB_STATE_MAX_AGE_SECONDS", "300"))
+DEFAULT_WIFI_PROXY_STATE_FILE = "wifi-direct-proxy.json"
+GNOME_PROXY_SCHEMA = "org.gnome.system.proxy"
+GNOME_PROXY_KEYS = ("mode", "autoconfig-url")
 
 
 @dataclass(frozen=True)
@@ -643,6 +648,336 @@ def wifi_status(args: argparse.Namespace) -> int:
     return 0 if working and warning is None else 1
 
 
+def resolve_wifi_proxy_state_path(raw: str | None) -> Path:
+    if raw:
+        return Path(raw).expanduser()
+    return pdalink_state_dir() / DEFAULT_WIFI_PROXY_STATE_FILE
+
+
+def gsettings_string(value: str) -> str:
+    return repr(value)
+
+
+def parse_gsettings_string(raw: str) -> str:
+    try:
+        value = ast.literal_eval(raw)
+    except (SyntaxError, ValueError):
+        return raw
+    return value if isinstance(value, str) else raw
+
+
+def gsettings_get(key: str) -> str:
+    result = run_command(["gsettings", "get", GNOME_PROXY_SCHEMA, key], timeout=5.0)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip() or f"gsettings exited {result.returncode}"
+        raise RuntimeError(f"cannot read GNOME proxy {key}: {detail}")
+    return result.stdout.strip()
+
+
+def gsettings_set(key: str, serialized_value: str) -> None:
+    result = run_command(
+        ["gsettings", "set", GNOME_PROXY_SCHEMA, key, serialized_value],
+        timeout=5.0,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip() or f"gsettings exited {result.returncode}"
+        raise RuntimeError(f"cannot set GNOME proxy {key}: {detail}")
+
+
+def gnome_proxy_snapshot() -> dict[str, str]:
+    if shutil.which("gsettings") is None:
+        raise RuntimeError(
+            "gsettings not found; use `./tools/pdalink.sh wifi env --probe` "
+            "or configure the desktop proxy manually"
+        )
+    return {key: gsettings_get(key) for key in GNOME_PROXY_KEYS}
+
+
+def restore_gnome_proxy(snapshot: dict[str, str]) -> None:
+    # Leave PdaLink auto mode before replacing its PAC URL.
+    for key in GNOME_PROXY_KEYS:
+        value = snapshot.get(key)
+        if not isinstance(value, str) or not value:
+            raise RuntimeError(f"invalid GNOME proxy snapshot: missing {key}")
+        gsettings_set(key, value)
+    restored = {key: gsettings_get(key) for key in GNOME_PROXY_KEYS}
+    if restored != snapshot:
+        raise RuntimeError("GNOME proxy settings did not retain the saved restore snapshot")
+
+
+def current_gnome_proxy() -> tuple[str, str]:
+    return (
+        parse_gsettings_string(gsettings_get("mode")),
+        parse_gsettings_string(gsettings_get("autoconfig-url")),
+    )
+
+
+def gnome_proxy_owned_by_pdalink(pac_url: str) -> bool:
+    mode, configured_url = current_gnome_proxy()
+    return mode == "auto" and configured_url == pac_url
+
+
+def load_wifi_proxy_state(path: Path) -> dict[str, object]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise ValueError(f"Wi-Fi Direct proxy state not found: {path}") from None
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid Wi-Fi Direct proxy state {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"invalid Wi-Fi Direct proxy state {path}: payload must be an object")
+    if payload.get("version") != 1:
+        raise ValueError(f"invalid Wi-Fi Direct proxy state {path}: unsupported version")
+    if payload.get("transport") != WIFI_DIRECT_TRANSPORT_NAME or payload.get("manager") != "gsettings":
+        raise ValueError(f"invalid Wi-Fi Direct proxy state {path}: unexpected owner")
+    pac_url = payload.get("pac_url")
+    if not isinstance(pac_url, str):
+        raise ValueError(f"invalid Wi-Fi Direct proxy state {path}: missing PAC URL")
+    try:
+        parsed_pac = urlparse(pac_url)
+        pac_port = parsed_pac.port
+    except ValueError as exc:
+        raise ValueError(f"invalid Wi-Fi Direct proxy state {path}: malformed PAC URL") from exc
+    if (
+        parsed_pac.scheme != "http"
+        or not parsed_pac.hostname
+        or pac_port is None
+        or parsed_pac.path != "/proxy.pac"
+        or parsed_pac.params
+        or parsed_pac.query
+        or parsed_pac.fragment
+    ):
+        raise ValueError(f"invalid Wi-Fi Direct proxy state {path}: unexpected PAC URL")
+    before = payload.get("before")
+    if not isinstance(before, dict) or any(not isinstance(before.get(key), str) for key in GNOME_PROXY_KEYS):
+        raise ValueError(f"invalid Wi-Fi Direct proxy state {path}: missing GNOME proxy snapshot")
+    if not isinstance(payload.get("profile_name"), str) or not isinstance(payload.get("disconnect_on_stop"), bool):
+        raise ValueError(f"invalid Wi-Fi Direct proxy state {path}: missing connection ownership")
+    return payload
+
+
+def enable_gnome_wifi_proxy(
+    *,
+    state_path: Path,
+    pac_url: str,
+    ssid: str,
+    profile_name: str,
+    disconnect_on_stop: bool,
+) -> None:
+    if state_path.exists():
+        raise RuntimeError(
+            f"Wi-Fi Direct proxy state already exists: {state_path}. "
+            "Run `./tools/pdalink.sh wifi internet stop` first."
+        )
+    before = gnome_proxy_snapshot()
+    state = {
+        "version": 1,
+        "transport": WIFI_DIRECT_TRANSPORT_NAME,
+        "manager": "gsettings",
+        "created_at": utc_now(),
+        "pac_url": pac_url,
+        "ssid": ssid,
+        "profile_name": profile_name,
+        "disconnect_on_stop": disconnect_on_stop,
+        "before": before,
+    }
+    create_private_json(state_path, state)
+    try:
+        gsettings_set("autoconfig-url", gsettings_string(pac_url))
+        gsettings_set("mode", gsettings_string("auto"))
+        if not gnome_proxy_owned_by_pdalink(pac_url):
+            raise RuntimeError("GNOME proxy settings did not retain the PdaLink PAC URL")
+    except Exception as apply_error:
+        try:
+            restore_gnome_proxy(before)
+        except Exception as restore_error:
+            raise RuntimeError(
+                f"PdaLink proxy apply failed ({apply_error}); automatic restore also failed "
+                f"({restore_error}). Restore state retained at {state_path}."
+            ) from restore_error
+        else:
+            state_path.unlink(missing_ok=True)
+        raise apply_error
+
+
+def disconnect_wifi_profile(profile_name: str) -> bool:
+    if not profile_name:
+        return True
+    active_names = {connection.name for connection in active_nm_connections()}
+    if profile_name not in active_names:
+        return True
+    result = run_command(["nmcli", "connection", "down", profile_name], timeout=15.0)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip() or f"nmcli exited {result.returncode}"
+        print(f"warning: could not disconnect {profile_name!r}: {detail}", file=sys.stderr)
+        return False
+    print(f"Disconnected Wi-Fi Direct profile {profile_name!r}.")
+    return True
+
+
+def acquire_wifi_proxy_start_lock(state_path: Path) -> int:
+    lock_path = state_path.with_name(state_path.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        os.fchmod(fd, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, BlockingIOError) as exc:
+        if "fd" in locals():
+            os.close(fd)
+        raise RuntimeError("another Wi-Fi Direct proxy start is already running") from exc
+    return fd
+
+
+def wifi_internet_start_locked(args: argparse.Namespace, state_path: Path) -> int:
+    if state_path.exists():
+        print(
+            f"Wi-Fi Direct proxy state already exists: {state_path}. "
+            "Run `./tools/pdalink.sh wifi internet stop` first.",
+            file=sys.stderr,
+        )
+        return 2
+
+    active_before = active_wifi_direct_network_from_nmcli(args.ssid_pattern, args.iface)
+    if args.ssid:
+        connection_args = argparse.Namespace(
+            ssid=args.ssid,
+            password=args.password,
+            iface=args.iface,
+            verify=True,
+            host=args.host,
+            ports=args.ports,
+            verify_timeout=args.verify_timeout,
+        )
+        status = connect(connection_args)
+        connected_ssid = args.ssid
+    else:
+        status = connect_auto(args)
+        active_after = active_wifi_direct_network_from_nmcli(args.ssid_pattern, args.iface)
+        connected_ssid = active_after.ssid if active_after else ""
+    if status != 0:
+        return status
+
+    active_after = active_wifi_direct_network_from_nmcli(args.ssid_pattern, args.iface)
+    if active_after is not None:
+        connected_ssid = active_after.ssid
+    if not connected_ssid:
+        print("Connected Wi-Fi Direct SSID could not be identified.", file=sys.stderr)
+        return 1
+
+    connection = active_wifi_direct_connection(connected_ssid, args.iface)
+    profile_name = connection.name if connection else WIFI_DIRECT_PROFILE_NAME
+    disconnect_on_stop = active_before is None or active_before.ssid != connected_ssid
+
+    try:
+        port = first_verified_pdalink_port(args.host, parse_ports(args.ports))
+        pac_url = f"http://{args.host}:{port}/proxy.pac"
+        enable_gnome_wifi_proxy(
+            state_path=state_path,
+            pac_url=pac_url,
+            ssid=connected_ssid,
+            profile_name=profile_name,
+            disconnect_on_stop=disconnect_on_stop,
+        )
+    except (RuntimeError, SystemExit) as exc:
+        print(str(exc), file=sys.stderr)
+        if disconnect_on_stop:
+            disconnect_wifi_profile(profile_name)
+        return 1
+
+    print(f"PdaLink Wi-Fi Direct internet enabled with PAC {pac_url}")
+    print(f"Restore state: {state_path}")
+    return 0
+
+
+def wifi_internet_start(args: argparse.Namespace) -> int:
+    state_path = resolve_wifi_proxy_state_path(args.state_file)
+    try:
+        lock_fd = acquire_wifi_proxy_start_lock(state_path)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    try:
+        return wifi_internet_start_locked(args, state_path)
+    finally:
+        os.close(lock_fd)
+
+
+def wifi_internet_proxy_status(args: argparse.Namespace) -> int:
+    state_path = resolve_wifi_proxy_state_path(args.state_file)
+    print("GNOME managed proxy:")
+    if not state_path.exists():
+        print(f"  state: inactive ({state_path})")
+        return 1
+    try:
+        state = load_wifi_proxy_state(state_path)
+        pac_url = str(state.get("pac_url") or "")
+        owned = gnome_proxy_owned_by_pdalink(pac_url)
+    except (RuntimeError, ValueError) as exc:
+        print(f"  state: invalid ({exc})")
+        return 1
+    state_label = "active" if owned else "drifted"
+    state_detail = ""
+    if owned:
+        parsed_pac = urlparse(pac_url)
+        assert parsed_pac.hostname is not None and parsed_pac.port is not None
+        pac_state, pac_detail = expected_pdalink_pac_status(parsed_pac.hostname, parsed_pac.port)
+        if pac_state != "active":
+            state_label = pac_state
+            state_detail = f" ({pac_detail})"
+    print(f"  state: {state_label}{state_detail}")
+    print(f"  PAC: {pac_url}")
+    print(f"  restore: {state_path}")
+    return 0 if state_label == "active" else 2
+
+
+def wifi_internet_status(args: argparse.Namespace) -> int:
+    wifi_result = wifi_status(args)
+    proxy_result = wifi_internet_proxy_status(args)
+    return 0 if wifi_result == 0 and proxy_result == 0 else 1
+
+
+def wifi_internet_stop(args: argparse.Namespace) -> int:
+    state_path = resolve_wifi_proxy_state_path(args.state_file)
+    try:
+        state = load_wifi_proxy_state(state_path)
+        pac_url = str(state.get("pac_url") or "")
+        owned = gnome_proxy_owned_by_pdalink(pac_url)
+        if not owned and not args.force:
+            print(
+                "GNOME proxy settings changed after PdaLink start; refusing to overwrite them. "
+                "Use --force only to recover the saved snapshot.",
+                file=sys.stderr,
+            )
+            return 2
+        before = state["before"]
+        assert isinstance(before, dict)
+        restore_gnome_proxy({str(key): str(value) for key, value in before.items()})
+    except (RuntimeError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    try:
+        state_path.unlink(missing_ok=True)
+    except OSError as exc:
+        print(
+            f"GNOME proxy was restored, but restore state could not be removed: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    print("Restored previous GNOME proxy settings.")
+    if args.keep_wifi or not bool(state.get("disconnect_on_stop")):
+        return 0
+    profile_name = str(state.get("profile_name") or WIFI_DIRECT_PROFILE_NAME)
+    return 0 if disconnect_wifi_profile(profile_name) else 1
+
+
+def wifi_internet_test(args: argparse.Namespace) -> int:
+    if wifi_internet_status(args) != 0:
+        return 1
+    return curl_test(args)
+
+
 def active_wifi_direct_network(networks: Iterable[WifiNetwork], pattern: str = "DIRECT-") -> WifiNetwork | None:
     return choose_wifi_direct_network(
         (network for network in networks if network.in_use),
@@ -737,6 +1072,32 @@ def probe_one(host: str, port: int) -> ProbeResult:
     if parsed:
         return ProbeResult(host, port, True, f"PAC advertises {parsed[0]}:{parsed[1]}", pac)
     return ProbeResult(host, port, False, "connected, but PAC proxy line not found", pac)
+
+
+def expected_pdalink_pac_status(host: str, port: int) -> tuple[str, str]:
+    try:
+        pac = request_pac(host, port)
+    except OSError as exc:
+        return "unreachable", str(exc)
+    advertised = parse_proxy_from_pac(pac)
+    if advertised is None:
+        return "untrusted", "PAC proxy line not found"
+    if advertised != (host, port):
+        return "untrusted", f"PAC advertises {advertised[0]}:{advertised[1]}, expected {host}:{port}"
+    return "active", f"PAC advertises {host}:{port}"
+
+
+def first_verified_pdalink_port(host: str, ports: Iterable[int]) -> int:
+    warning = route_warning(host, route_info(host))
+    if warning:
+        raise RuntimeError(warning)
+    failures: list[str] = []
+    for port in ports:
+        state, detail = expected_pdalink_pac_status(host, port)
+        if state == "active":
+            return port
+        failures.append(f"{port}: {state} ({detail})")
+    raise RuntimeError("No trusted PdaLink proxy port found: " + "; ".join(failures))
 
 
 def probe(args: argparse.Namespace) -> int:
@@ -2289,11 +2650,39 @@ def atomic_write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    try:
+        tmp.chmod(0o600)
+    except OSError:
+        pass
     tmp.replace(path)
     try:
         path.chmod(0o600)
     except OSError:
         pass
+
+
+def create_private_json(path: Path, payload: dict) -> None:
+    """Create private state without overwriting a concurrent owner's snapshot."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as exc:
+        raise RuntimeError(
+            f"Wi-Fi Direct proxy state already exists: {path}. "
+            "Run `./tools/pdalink.sh wifi internet stop` first."
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(f"cannot create Wi-Fi Direct proxy state {path}: {exc}") from exc
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as state_file:
+            json.dump(payload, state_file, indent=2, sort_keys=True)
+            state_file.write("\n")
+    except Exception as exc:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise RuntimeError(f"cannot write Wi-Fi Direct proxy state {path}: {exc}") from exc
 
 
 def load_user_config(path: Path | None = None) -> dict[str, str]:
@@ -3053,6 +3442,49 @@ def build_parser() -> argparse.ArgumentParser:
     add_target_args(wifi_status_parser)
     wifi_status_parser.set_defaults(func=wifi_status)
 
+    wifi_internet_start_parser = sub.add_parser(
+        "wifi-internet-start",
+        help="connect Wi-Fi Direct and apply the GNOME PAC proxy transactionally",
+    )
+    wifi_internet_start_parser.add_argument("--ssid")
+    wifi_internet_start_parser.add_argument("--password")
+    wifi_internet_start_parser.add_argument("--iface")
+    wifi_internet_start_parser.add_argument("--ssid-pattern", default="DIRECT-")
+    wifi_internet_start_parser.add_argument("--verify-timeout", type=float, default=15.0)
+    wifi_internet_start_parser.add_argument("--state-file", default=os.getenv("PDALINK_WIFI_PROXY_STATE", ""))
+    add_wifi_direct_target_args(wifi_internet_start_parser)
+    wifi_internet_start_parser.set_defaults(func=wifi_internet_start)
+
+    wifi_internet_status_parser = sub.add_parser(
+        "wifi-internet-status",
+        help="show Wi-Fi Direct and GNOME managed proxy ownership",
+    )
+    wifi_internet_status_parser.add_argument("--iface")
+    wifi_internet_status_parser.add_argument("--ssid-pattern", default="DIRECT-")
+    wifi_internet_status_parser.add_argument("--state-file", default=os.getenv("PDALINK_WIFI_PROXY_STATE", ""))
+    add_wifi_direct_target_args(wifi_internet_status_parser)
+    wifi_internet_status_parser.set_defaults(func=wifi_internet_status)
+
+    wifi_internet_stop_parser = sub.add_parser(
+        "wifi-internet-stop",
+        help="restore the previous GNOME proxy and disconnect an owned Direct connection",
+    )
+    wifi_internet_stop_parser.add_argument("--state-file", default=os.getenv("PDALINK_WIFI_PROXY_STATE", ""))
+    wifi_internet_stop_parser.add_argument("--keep-wifi", action="store_true")
+    wifi_internet_stop_parser.add_argument("--force", action="store_true")
+    wifi_internet_stop_parser.set_defaults(func=wifi_internet_stop)
+
+    wifi_internet_test_parser = sub.add_parser(
+        "wifi-internet-test",
+        help="verify managed proxy ownership and run an explicit proxy request",
+    )
+    wifi_internet_test_parser.add_argument("--iface")
+    wifi_internet_test_parser.add_argument("--ssid-pattern", default="DIRECT-")
+    wifi_internet_test_parser.add_argument("--state-file", default=os.getenv("PDALINK_WIFI_PROXY_STATE", ""))
+    wifi_internet_test_parser.add_argument("--url", default="https://ifconfig.me")
+    add_wifi_direct_target_args(wifi_internet_test_parser)
+    wifi_internet_test_parser.set_defaults(func=wifi_internet_test)
+
     probe_parser = sub.add_parser("probe", help="probe Android proxy PAC endpoint")
     add_target_args(probe_parser)
     probe_parser.add_argument("--show-pac", action="store_true")
@@ -3310,6 +3742,14 @@ def build_parser() -> argparse.ArgumentParser:
 def add_target_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--host", default=os.getenv("PDALINK_HOST", DEFAULT_HOST))
     parser.add_argument("--ports", default=os.getenv("PDALINK_PORTS", ",".join(str(p) for p in DEFAULT_PORTS)))
+
+
+def add_wifi_direct_target_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--host", default=os.getenv("PDALINK_HOST", DEFAULT_HOST))
+    parser.add_argument(
+        "--ports",
+        default=os.getenv("PDALINK_WIFI_PORTS", os.getenv("PDALINK_PORTS", "8001")),
+    )
 
 
 def add_usb_args(parser: argparse.ArgumentParser) -> None:

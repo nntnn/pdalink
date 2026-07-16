@@ -98,6 +98,36 @@ network:
 ./tools/e2e_smoke.sh
 ```
 
+## Linux Managed Wi-Fi Direct Proxy
+
+On a NetworkManager + GNOME desktop, connect and apply the PAC in one
+transaction:
+
+```bash
+./tools/pdalink.sh wifi internet start --password 'password-shown-in-android'
+./tools/pdalink.sh wifi internet status
+./tools/pdalink.sh wifi internet test --url https://cloudflare.com/cdn-cgi/trace
+```
+
+Expected status:
+
+- the active Wi-Fi SSID matches `DIRECT-*`;
+- the route to `192.168.49.1` uses the Wi-Fi interface;
+- port `8001` serves a PAC advertising `192.168.49.1:8001`;
+- `GNOME managed proxy` reports `state: active`;
+- the HTTPS test returns HTTP content through the Direct proxy.
+
+Restore the prior GNOME proxy values:
+
+```bash
+./tools/pdalink.sh wifi internet stop
+```
+
+Use `--keep-wifi` when testing restore without disconnecting the Direct group.
+If status reports `drifted`, inspect the newer desktop proxy setting before
+using `wifi internet stop --force`; the default stop deliberately preserves
+settings changed after PdaLink started.
+
 To rebuild, install, start through the ADB-safe debug activity, then verify:
 
 ```bash

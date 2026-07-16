@@ -16,7 +16,7 @@ Usage:
   $0 usb status [--local-port PORT] [--remote-port PORT]
   $0 usb test [--install APK] [usb-smoke options...]
   $0 usb stop [--local-port PORT] [--remote-port PORT] [--stop-android]
-  $0 wifi {start-android|stop-android|scan|connect|status|probe|env|curl-test|test|smoke|doctor} [...]
+  $0 wifi {start-android|stop-android|scan|connect|status|internet|probe|env|curl-test|test|smoke|doctor} [...]
   $0 connection status [--json] [connection-status options...]
   $0 product-usb {status|check|aoa-start} [...]
   $0 status [--json]
@@ -80,6 +80,10 @@ Usage:
   $0 wifi scan
   $0 wifi connect [--ssid SSID] --password PASSWORD [--iface IFACE] [--ssid-pattern DIRECT-] [--host HOST] [--ports PORTS]
   $0 wifi status [--ssid-pattern DIRECT-] [--iface IFACE] [--host HOST] [--ports PORTS]
+  $0 wifi internet start [--ssid SSID] --password PASSWORD [--iface IFACE] [--host HOST] [--ports PORTS] [--state-file PATH]
+  $0 wifi internet status [--ssid-pattern DIRECT-] [--iface IFACE] [--host HOST] [--ports PORTS] [--state-file PATH]
+  $0 wifi internet test [--url URL] [--host HOST] [--ports PORTS] [--state-file PATH]
+  $0 wifi internet stop [--state-file PATH] [--keep-wifi] [--force]
   $0 wifi probe [--host HOST] [--ports PORTS] [--show-pac]
   $0 wifi env [--host HOST] [--ports PORTS] [--probe]
   $0 wifi curl-test [--url URL] [--host HOST] [--ports PORTS]
@@ -90,8 +94,9 @@ Usage:
 Manual Wi-Fi Direct flow:
   1. Start Wi-Fi Direct in the Android app or run: $0 wifi start-android
   2. Copy the password shown in the Android app.
-  3. Run: $0 wifi connect --password '...'
-  4. Run: $0 wifi status
+  3. For a connection only, run: $0 wifi connect --password '...'
+  4. For a managed GNOME proxy, run: $0 wifi internet start --password '...'
+  5. Run: $0 wifi internet status
 EOF
 }
 
@@ -911,6 +916,34 @@ main() {
         status)
           shift
           wifi_python_cmd wifi-status "$@"
+          ;;
+        internet)
+          shift
+          case "${1:-}" in
+            start)
+              shift
+              wifi_python_cmd wifi-internet-start "$@"
+              ;;
+            status)
+              shift
+              wifi_python_cmd wifi-internet-status "$@"
+              ;;
+            test)
+              shift
+              wifi_python_cmd wifi-internet-test "$@"
+              ;;
+            stop)
+              shift
+              wifi_python_cmd wifi-internet-stop "$@"
+              ;;
+            -h|--help|"")
+              wifi_usage
+              ;;
+            *)
+              wifi_usage >&2
+              exit 2
+              ;;
+          esac
           ;;
         probe)
           shift
