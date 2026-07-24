@@ -37,11 +37,12 @@ public class ImpactDisplayStateTest {
     public void highStaysWithinFourPercent() {
         ImpactDisplayState state = ImpactDisplayState.ready();
         Random random = new Random(12345L);
+        double reference = 200.0;
 
-        state = state.nextHigh(random);
+        state = state.nextHigh(random, reference);
         assertEquals(1, state.count());
-        assertTrue(state.value() >= 113.6 * 0.96);
-        assertTrue(state.value() <= 113.6 * 1.04);
+        assertTrue(state.value() >= reference * 0.96);
+        assertTrue(state.value() <= reference * 1.04);
     }
 
     @Test
@@ -54,8 +55,32 @@ public class ImpactDisplayStateTest {
         assertEquals(
                 16,
                 ImpactDisplayState.ready()
-                        .nextLow(new Random(7L), 998.89)
+                        .nextLow(maximumRandom(), 998.89)
                         .line2()
                         .length());
+    }
+
+    @Test
+    public void highReferenceRangeKeepsTheFormattedValueAtSixCharacters() {
+        assertTrue(ImpactDisplayState.isValidHighReference(0.00));
+        assertTrue(ImpactDisplayState.isValidHighReference(961.53));
+        assertFalse(ImpactDisplayState.isValidHighReference(-0.01));
+        assertFalse(ImpactDisplayState.isValidHighReference(961.54));
+        assertFalse(ImpactDisplayState.isValidHighReference(Double.POSITIVE_INFINITY));
+        assertEquals(
+                16,
+                ImpactDisplayState.ready()
+                        .nextHigh(maximumRandom(), 961.53)
+                        .line2()
+                        .length());
+    }
+
+    private static Random maximumRandom() {
+        return new Random() {
+            @Override
+            public double nextDouble() {
+                return Math.nextDown(1.0);
+            }
+        };
     }
 }

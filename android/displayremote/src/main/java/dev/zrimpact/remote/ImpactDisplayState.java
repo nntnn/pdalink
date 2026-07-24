@@ -9,7 +9,9 @@ final class ImpactDisplayState {
     static final double LOW_MAX_OFFSET = 1.10;
     static final double LOW_REFERENCE_MIN = 1.00;
     static final double LOW_REFERENCE_MAX = 998.89;
-    static final double HIGH_CENTER = 113.6;
+    static final double DEFAULT_HIGH_REFERENCE = 113.6;
+    static final double HIGH_REFERENCE_MIN = 0.00;
+    static final double HIGH_REFERENCE_MAX = 961.53;
     static final double TOLERANCE = 0.04;
 
     private final int count;
@@ -35,8 +37,11 @@ final class ImpactDisplayState {
                 LOW_MAX_OFFSET));
     }
 
-    ImpactDisplayState nextHigh(Random random) {
-        return next(randomValue(random, HIGH_CENTER));
+    ImpactDisplayState nextHigh(Random random, double reference) {
+        if (!isValidHighReference(reference)) {
+            throw new IllegalArgumentException("invalid high reference");
+        }
+        return next(randomValue(random, reference));
     }
 
     private ImpactDisplayState next(double nextValue) {
@@ -63,6 +68,12 @@ final class ImpactDisplayState {
         return Double.isFinite(reference)
                 && reference >= LOW_REFERENCE_MIN
                 && reference <= LOW_REFERENCE_MAX;
+    }
+
+    static boolean isValidHighReference(double reference) {
+        return Double.isFinite(reference)
+                && reference >= HIGH_REFERENCE_MIN
+                && reference <= HIGH_REFERENCE_MAX;
     }
 
     private static double randomOffsetValue(

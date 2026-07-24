@@ -37,6 +37,7 @@ public final class MainActivity extends Activity {
     private static final String PREFERENCES = "zr_display_remote";
     private static final String NETWORK_APPROVED = "network_approved";
     private static final String LOW_REFERENCE = "low_reference";
+    private static final String HIGH_REFERENCE = "high_reference";
     private static final int SOCKET_TIMEOUT_MS = 5_000;
 
     private final Random random = new SecureRandom();
@@ -49,6 +50,7 @@ public final class MainActivity extends Activity {
     private EditText line1View;
     private EditText line2View;
     private EditText lowReferenceView;
+    private EditText highReferenceView;
     private TextView statusView;
     private Button defaultButton;
     private Button lowButton;
@@ -73,6 +75,7 @@ public final class MainActivity extends Activity {
         line1View = findViewById(R.id.display_line1);
         line2View = findViewById(R.id.display_line2);
         lowReferenceView = findViewById(R.id.low_reference);
+        highReferenceView = findViewById(R.id.high_reference);
         statusView = findViewById(R.id.connection_status);
         defaultButton = findViewById(R.id.default_button);
         lowButton = findViewById(R.id.low_button);
@@ -81,7 +84,7 @@ public final class MainActivity extends Activity {
 
         defaultButton.setOnClickListener(view -> sendState(ImpactDisplayState.ready()));
         lowButton.setOnClickListener(view -> sendLow());
-        highButton.setOnClickListener(view -> sendState(impactState.nextHigh(random)));
+        highButton.setOnClickListener(view -> sendHigh());
         sendButton.setOnClickListener(view -> queueCommand(
                 line1View.getText().toString(),
                 line2View.getText().toString()));
@@ -93,6 +96,13 @@ public final class MainActivity extends Activity {
                                 Locale.US,
                                 "%.2f",
                                 ImpactDisplayState.DEFAULT_LOW_REFERENCE)));
+        highReferenceView.setText(getSharedPreferences(PREFERENCES, MODE_PRIVATE)
+                .getString(
+                        HIGH_REFERENCE,
+                        String.format(
+                                Locale.US,
+                                "%.2f",
+                                ImpactDisplayState.DEFAULT_HIGH_REFERENCE)));
         applyState(impactState);
         setControlsEnabled(BuildConfig.DISPLAY_AP_CONFIGURED);
         if (!BuildConfig.DISPLAY_AP_CONFIGURED) {
@@ -122,6 +132,28 @@ public final class MainActivity extends Activity {
                 .putString(LOW_REFERENCE, normalized)
                 .apply();
         sendState(impactState.nextLow(random, reference));
+    }
+
+    private void sendHigh() {
+        String input = highReferenceView.getText().toString().trim();
+        final double reference;
+        try {
+            reference = Double.parseDouble(input);
+        } catch (NumberFormatException exception) {
+            setStatus(R.string.high_reference_error, false);
+            return;
+        }
+        if (!ImpactDisplayState.isValidHighReference(reference)) {
+            setStatus(R.string.high_reference_error, false);
+            return;
+        }
+        String normalized = String.format(Locale.US, "%.2f", reference);
+        highReferenceView.setText(normalized);
+        getSharedPreferences(PREFERENCES, MODE_PRIVATE)
+                .edit()
+                .putString(HIGH_REFERENCE, normalized)
+                .apply();
+        sendState(impactState.nextHigh(random, reference));
     }
 
     private void sendState(ImpactDisplayState state) {
@@ -373,6 +405,7 @@ public final class MainActivity extends Activity {
         line1View.setEnabled(active);
         line2View.setEnabled(active);
         lowReferenceView.setEnabled(active);
+        highReferenceView.setEnabled(active);
     }
 
     private void setStatus(int stringId, boolean positive) {

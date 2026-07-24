@@ -55,6 +55,33 @@
             android:textColorHint="@color/text_secondary"
             android:textSize="18sp" />
 
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="@string/high_reference_label"
+            android:textColor="@color/text_secondary"
+            android:textSize="13sp" />
+
+        <EditText
+            android:id="@+id/high_reference"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/bg_input"
+            android:digits="0123456789."
+            android:hint="@string/high_reference_hint"
+            android:inputType="numberDecimal"
+            android:maxLength="7"
+            android:maxLines="1"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"
+            android:selectAllOnFocus="true"
+            android:singleLine="true"
+            android:textColor="@color/text_primary"
+            android:textColorHint="@color/text_secondary"
+            android:textSize="18sp" />
+
         <EditText
             android:id="@+id/display_line1"
             android:layout_width="match_parent"

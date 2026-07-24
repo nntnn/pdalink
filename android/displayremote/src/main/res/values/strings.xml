@@ -15,6 +15,9 @@
     <string name="low_reference_label">Low reference value (−1.00 to +1.10)</string>
     <string name="low_reference_hint">18.80</string>
     <string name="low_reference_error">Enter a reference value from 1.00 to 998.89.</string>
+    <string name="high_reference_label">High reference value (±4%)</string>
+    <string name="high_reference_hint">113.60</string>
+    <string name="high_reference_error">Enter a reference value from 0.00 to 961.53.</string>
     <string name="default_line1">n=  0      READY</string>
     <string name="default_line2">x=  0.00 J______</string>
     <string name="default_button">Default</string>
