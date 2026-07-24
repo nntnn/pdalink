@@ -1,0 +1,42 @@
+plugins {
+    id "com.android.application"
+}
+
+def javaString = { String value ->
+    "\"" + value
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"") + "\""
+}
+def displayApSsid = System.getenv("ZR_DISPLAY_AP_SSID") ?: "ZR-Impact-Display"
+def displayApPsk = System.getenv("ZR_DISPLAY_AP_PSK") ?: ""
+
+android {
+    namespace "dev.zrimpact.remote"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "dev.zrimpact.remote"
+        minSdk 29
+        targetSdk 35
+        versionCode 1
+        versionName "0.1.0"
+
+        buildConfigField "String", "DISPLAY_AP_SSID", javaString(displayApSsid)
+        buildConfigField "String", "DISPLAY_AP_PSK", javaString(displayApPsk)
+        buildConfigField "boolean", "DISPLAY_AP_CONFIGURED",
+                displayApPsk.length() >= 8 ? "true" : "false"
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    testImplementation "junit:junit:4.13.2"
+}

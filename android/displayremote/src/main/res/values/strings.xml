@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ZR Display Remote</string>
+    <string name="title">ZR Display Remote</string>
+    <string name="status_starting">Preparing the private Zero connection…</string>
+    <string name="status_permission">Allow nearby Wi-Fi access to connect to the Zero.</string>
+    <string name="status_connecting">Connecting to the private Zero display network…</string>
+    <string name="status_connected">Connected to the Zero display network.</string>
+    <string name="status_unavailable">The Zero display network is unavailable. Tap a command to retry.</string>
+    <string name="status_lost">Zero disconnected. Tap a command to reconnect.</string>
+    <string name="status_sending">Sending display command…</string>
+    <string name="status_accepted">Command accepted by Zero.</string>
+    <string name="status_not_configured">This development build has no Zero AP credential.</string>
+    <string name="default_line1">n=  0      READY</string>
+    <string name="default_line2">x=  0.00 J______</string>
+    <string name="default_button">Default</string>
+    <string name="low_button">Low</string>
+    <string name="high_button">High</string>
+    <string name="send_button">Send</string>
+</resources>
