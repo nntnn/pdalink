@@ -9,7 +9,11 @@ ANDROID_HOME="${ANDROID_HOME:-$ROOT/.tools/android-sdk}"
 
 if [[ -z "${ZR_DISPLAY_AP_PSK:-}" ]]; then
     config="$(
-        ssh -o BatchMode=yes -- "$HOST" \
+        ssh \
+            -o BatchMode=yes \
+            -o ConnectTimeout=5 \
+            -o ConnectionAttempts=1 \
+            -- "$HOST" \
             "cat /etc/zr-impact/display-ap.conf"
     )"
     ZR_DISPLAY_AP_SSID="$(

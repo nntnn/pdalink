@@ -26,6 +26,7 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
+import java.util.Locale;
 import java.util.Random;
 
 public final class MainActivity extends Activity {
@@ -35,15 +36,19 @@ public final class MainActivity extends Activity {
     private static final long RECONNECT_DELAY_MS = 2_000;
     private static final String PREFERENCES = "zr_display_remote";
     private static final String NETWORK_APPROVED = "network_approved";
+    private static final String LOW_REFERENCE = "low_reference";
     private static final int SOCKET_TIMEOUT_MS = 5_000;
 
     private final Random random = new SecureRandom();
+    private final DisplayConnectionState connectionState =
+            new DisplayConnectionState();
     private ConnectivityManager connectivityManager;
     private ConnectivityManager.NetworkCallback networkCallback;
     private Network displayNetwork;
     private ImpactDisplayState impactState = ImpactDisplayState.ready();
     private EditText line1View;
     private EditText line2View;
+    private EditText lowReferenceView;
     private TextView statusView;
     private Button defaultButton;
     private Button lowButton;
@@ -53,6 +58,7 @@ public final class MainActivity extends Activity {
     private String pendingLine2;
     private boolean networkRequestInFlight;
     private boolean networkApproved;
+    private boolean connectionDefaultPending;
     private boolean sending;
 
     @Override
@@ -66,6 +72,7 @@ public final class MainActivity extends Activity {
                 .getBoolean(NETWORK_APPROVED, false);
         line1View = findViewById(R.id.display_line1);
         line2View = findViewById(R.id.display_line2);
+        lowReferenceView = findViewById(R.id.low_reference);
         statusView = findViewById(R.id.connection_status);
         defaultButton = findViewById(R.id.default_button);
         lowButton = findViewById(R.id.low_button);
@@ -73,12 +80,19 @@ public final class MainActivity extends Activity {
         sendButton = findViewById(R.id.send_button);
 
         defaultButton.setOnClickListener(view -> sendState(ImpactDisplayState.ready()));
-        lowButton.setOnClickListener(view -> sendState(impactState.nextLow(random)));
+        lowButton.setOnClickListener(view -> sendLow());
         highButton.setOnClickListener(view -> sendState(impactState.nextHigh(random)));
         sendButton.setOnClickListener(view -> queueCommand(
                 line1View.getText().toString(),
                 line2View.getText().toString()));
 
+        lowReferenceView.setText(getSharedPreferences(PREFERENCES, MODE_PRIVATE)
+                .getString(
+                        LOW_REFERENCE,
+                        String.format(
+                                Locale.US,
+                                "%.2f",
+                                ImpactDisplayState.DEFAULT_LOW_REFERENCE)));
         applyState(impactState);
         setControlsEnabled(BuildConfig.DISPLAY_AP_CONFIGURED);
         if (!BuildConfig.DISPLAY_AP_CONFIGURED) {
@@ -86,6 +100,28 @@ public final class MainActivity extends Activity {
         } else {
             ensureDisplayNetwork();
         }
+    }
+
+    private void sendLow() {
+        String input = lowReferenceView.getText().toString().trim();
+        final double reference;
+        try {
+            reference = Double.parseDouble(input);
+        } catch (NumberFormatException exception) {
+            setStatus(R.string.low_reference_error, false);
+            return;
+        }
+        if (!ImpactDisplayState.isValidLowReference(reference)) {
+            setStatus(R.string.low_reference_error, false);
+            return;
+        }
+        String normalized = String.format(Locale.US, "%.2f", reference);
+        lowReferenceView.setText(normalized);
+        getSharedPreferences(PREFERENCES, MODE_PRIVATE)
+                .edit()
+                .putString(LOW_REFERENCE, normalized)
+                .apply();
+        sendState(impactState.nextLow(random, reference));
     }
 
     private void sendState(ImpactDisplayState state) {
@@ -150,6 +186,9 @@ public final class MainActivity extends Activity {
             @Override
             public void onAvailable(Network network) {
                 runOnUiThread(() -> {
+                    if (!connectionState.onAvailable()) {
+                        return;
+                    }
                     displayNetwork = network;
                     if (!networkApproved) {
                         networkApproved = true;
@@ -159,9 +198,8 @@ public final class MainActivity extends Activity {
                                 .apply();
                     }
                     setStatus(R.string.status_connected, true);
-                    if (pendingLine1 != null) {
-                        sendPendingCommand();
-                    }
+                    connectionDefaultPending = true;
+                    sendPendingCommand();
                 });
             }
 
@@ -170,6 +208,8 @@ public final class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     if (network.equals(displayNetwork)) {
                         displayNetwork = null;
+                        connectionState.onLost();
+                        connectionDefaultPending = false;
                         resetNetworkRequest(this);
                         setStatus(R.string.status_lost, false);
                         statusView.postDelayed(() -> {
@@ -210,13 +250,30 @@ public final class MainActivity extends Activity {
 
     private void sendPendingCommand() {
         Network network = displayNetwork;
-        String line1 = pendingLine1;
-        String line2 = pendingLine2;
-        if (network == null || line1 == null || line2 == null || sending) {
+        if (network == null || sending) {
             return;
         }
-        pendingLine1 = null;
-        pendingLine2 = null;
+        boolean automaticDefault = connectionDefaultPending;
+        String line1;
+        String line2;
+        if (automaticDefault) {
+            connectionDefaultPending = false;
+            ImpactDisplayState ready = ImpactDisplayState.ready();
+            line1 = ready.line1();
+            line2 = ready.line2();
+            if (pendingLine1 == null) {
+                impactState = ready;
+                applyState(ready);
+            }
+        } else {
+            line1 = pendingLine1;
+            line2 = pendingLine2;
+            if (line1 == null || line2 == null) {
+                return;
+            }
+            pendingLine1 = null;
+            pendingLine2 = null;
+        }
         sending = true;
         setControlsEnabled(false);
         setStatus(R.string.status_sending, true);
@@ -226,10 +283,15 @@ public final class MainActivity extends Activity {
                 sending = false;
                 setControlsEnabled(BuildConfig.DISPLAY_AP_CONFIGURED);
                 if (result == null) {
-                    setStatus(R.string.status_accepted, true);
+                    setStatus(
+                            automaticDefault
+                                    ? R.string.status_default_accepted
+                                    : R.string.status_accepted,
+                            true);
                 } else {
                     setStatus(result, false);
                 }
+                sendPendingCommand();
             });
         }, "zr-display-send").start();
     }
@@ -310,6 +372,7 @@ public final class MainActivity extends Activity {
         sendButton.setEnabled(active);
         line1View.setEnabled(active);
         line2View.setEnabled(active);
+        lowReferenceView.setEnabled(active);
     }
 
     private void setStatus(int stringId, boolean positive) {
@@ -329,6 +392,8 @@ public final class MainActivity extends Activity {
             resetNetworkRequest(networkCallback);
         }
         displayNetwork = null;
+        connectionState.onLost();
+        connectionDefaultPending = false;
         super.onDestroy();
     }
 }

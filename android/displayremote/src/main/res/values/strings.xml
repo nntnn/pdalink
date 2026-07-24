@@ -10,7 +10,11 @@
     <string name="status_lost">Zero disconnected. Tap a command to reconnect.</string>
     <string name="status_sending">Sending display command…</string>
     <string name="status_accepted">Command accepted by Zero.</string>
+    <string name="status_default_accepted">Connected; Default sent to Zero.</string>
     <string name="status_not_configured">This development build has no Zero AP credential.</string>
+    <string name="low_reference_label">Low reference value (−1.00 to +1.10)</string>
+    <string name="low_reference_hint">18.80</string>
+    <string name="low_reference_error">Enter a reference value from 1.00 to 998.89.</string>
     <string name="default_line1">n=  0      READY</string>
     <string name="default_line2">x=  0.00 J______</string>
     <string name="default_button">Default</string>

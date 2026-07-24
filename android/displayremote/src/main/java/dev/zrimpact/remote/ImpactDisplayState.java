@@ -4,7 +4,11 @@ import java.util.Locale;
 import java.util.Random;
 
 final class ImpactDisplayState {
-    static final double LOW_CENTER = 18.8;
+    static final double DEFAULT_LOW_REFERENCE = 18.8;
+    static final double LOW_MIN_OFFSET = -1.00;
+    static final double LOW_MAX_OFFSET = 1.10;
+    static final double LOW_REFERENCE_MIN = 1.00;
+    static final double LOW_REFERENCE_MAX = 998.89;
     static final double HIGH_CENTER = 113.6;
     static final double TOLERANCE = 0.04;
 
@@ -20,8 +24,15 @@ final class ImpactDisplayState {
         return new ImpactDisplayState(0, 0.0);
     }
 
-    ImpactDisplayState nextLow(Random random) {
-        return next(randomValue(random, LOW_CENTER));
+    ImpactDisplayState nextLow(Random random, double reference) {
+        if (!isValidLowReference(reference)) {
+            throw new IllegalArgumentException("invalid low reference");
+        }
+        return next(randomOffsetValue(
+                random,
+                reference,
+                LOW_MIN_OFFSET,
+                LOW_MAX_OFFSET));
     }
 
     ImpactDisplayState nextHigh(Random random) {
@@ -46,6 +57,25 @@ final class ImpactDisplayState {
 
     double value() {
         return value;
+    }
+
+    static boolean isValidLowReference(double reference) {
+        return Double.isFinite(reference)
+                && reference >= LOW_REFERENCE_MIN
+                && reference <= LOW_REFERENCE_MAX;
+    }
+
+    private static double randomOffsetValue(
+            Random random,
+            double reference,
+            double minimumOffset,
+            double maximumOffset) {
+        if (random == null) {
+            throw new IllegalArgumentException("random is required");
+        }
+        return reference
+                + minimumOffset
+                + random.nextDouble() * (maximumOffset - minimumOffset);
     }
 
     private static double randomValue(Random random, double center) {

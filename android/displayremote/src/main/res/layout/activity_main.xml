@@ -2,6 +2,7 @@
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:background="@color/background"
     android:fillViewport="true">
 
     <LinearLayout
@@ -27,11 +28,38 @@
             android:textColor="@color/text_secondary"
             android:textSize="15sp" />
 
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="28dp"
+            android:text="@string/low_reference_label"
+            android:textColor="@color/text_secondary"
+            android:textSize="13sp" />
+
+        <EditText
+            android:id="@+id/low_reference"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/bg_input"
+            android:digits="0123456789."
+            android:hint="@string/low_reference_hint"
+            android:inputType="numberDecimal"
+            android:maxLength="7"
+            android:maxLines="1"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"
+            android:selectAllOnFocus="true"
+            android:singleLine="true"
+            android:textColor="@color/text_primary"
+            android:textColorHint="@color/text_secondary"
+            android:textSize="18sp" />
+
         <EditText
             android:id="@+id/display_line1"
             android:layout_width="match_parent"
             android:layout_height="56dp"
-            android:layout_marginTop="28dp"
+            android:layout_marginTop="24dp"
             android:background="@drawable/bg_input"
             android:fontFamily="sans-serif-monospace"
             android:inputType="textVisiblePassword"
@@ -71,9 +99,11 @@
                 android:id="@+id/default_button"
                 android:layout_width="0dp"
                 android:layout_height="56dp"
+                android:backgroundTint="@color/button_background"
                 android:layout_weight="1"
                 android:text="@string/default_button"
-                android:textAllCaps="false" />
+                android:textAllCaps="false"
+                android:textColor="@color/text_primary" />
 
             <Button
                 android:id="@+id/low_button"
@@ -81,8 +111,10 @@
                 android:layout_height="56dp"
                 android:layout_marginStart="8dp"
                 android:layout_weight="1"
+                android:backgroundTint="@color/button_background"
                 android:text="@string/low_button"
-                android:textAllCaps="false" />
+                android:textAllCaps="false"
+                android:textColor="@color/text_primary" />
 
             <Button
                 android:id="@+id/high_button"
@@ -90,8 +122,10 @@
                 android:layout_height="56dp"
                 android:layout_marginStart="8dp"
                 android:layout_weight="1"
+                android:backgroundTint="@color/button_background"
                 android:text="@string/high_button"
-                android:textAllCaps="false" />
+                android:textAllCaps="false"
+                android:textColor="@color/text_primary" />
         </LinearLayout>
 
         <Button
@@ -99,8 +133,10 @@
             android:layout_width="match_parent"
             android:layout_height="60dp"
             android:layout_marginTop="16dp"
+            android:backgroundTint="@color/button_background"
             android:text="@string/send_button"
             android:textAllCaps="false"
+            android:textColor="@color/text_primary"
             android:textSize="18sp"
             android:textStyle="bold" />
     </LinearLayout>

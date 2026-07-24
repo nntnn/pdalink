@@ -1,10 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="background">#F4F6F8</color>
-    <color name="text_primary">#17212B</color>
-    <color name="text_secondary">#53606D</color>
-    <color name="input_background">#FFFFFF</color>
-    <color name="input_border">#B8C1CA</color>
-    <color name="success">#16794A</color>
-    <color name="error">#B3261E</color>
+    <color name="background">#080A0D</color>
+    <color name="text_primary">#F3F6FA</color>
+    <color name="text_secondary">#A7B0BC</color>
+    <color name="input_background">#15191E</color>
+    <color name="input_border">#3B434D</color>
+    <color name="button_background">#252B33</color>
+    <color name="success">#62D99B</color>
+    <color name="error">#FF7B82</color>
 </resources>
