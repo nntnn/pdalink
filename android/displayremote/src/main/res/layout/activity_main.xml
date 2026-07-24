@@ -177,5 +177,29 @@
             android:textColor="@color/text_primary"
             android:textSize="18sp"
             android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="@string/log_label"
+            android:textColor="@color/text_secondary"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/action_log"
+            android:layout_width="match_parent"
+            android:layout_height="220dp"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/bg_input"
+            android:fadeScrollbars="false"
+            android:fontFamily="sans-serif-monospace"
+            android:gravity="top"
+            android:padding="12dp"
+            android:scrollbars="vertical"
+            android:text="@string/log_empty"
+            android:textColor="@color/text_primary"
+            android:textIsSelectable="true"
+            android:textSize="13sp" />
     </LinearLayout>
 </ScrollView>

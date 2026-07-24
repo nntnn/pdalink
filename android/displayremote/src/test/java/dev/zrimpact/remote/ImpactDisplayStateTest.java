@@ -17,6 +17,7 @@ public class ImpactDisplayStateTest {
         assertEquals("x=  0.00 J______", state.line2());
         assertEquals(16, state.line1().length());
         assertEquals(16, state.line2().length());
+        assertEquals("n=0, 0.00 J", state.logValue());
     }
 
     @Test
@@ -62,6 +63,7 @@ public class ImpactDisplayStateTest {
         assertEquals(1, state.count());
         assertTrue(state.value() >= reference * 0.96);
         assertTrue(state.value() <= reference * 1.04);
+        assertTrue(state.logValue().matches("n=1, \\d+\\.\\d{2} J"));
     }
 
     @Test

@@ -26,4 +26,7 @@
     <string name="high_button">High</string>
     <string name="zero_button">Zero</string>
     <string name="send_button">Send</string>
+    <string name="log_label">Button log (newest first)</string>
+    <string name="log_empty">No button presses recorded.</string>
+    <string name="log_invalid_reference">invalid reference</string>
 </resources>

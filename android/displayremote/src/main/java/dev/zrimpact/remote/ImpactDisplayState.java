@@ -71,6 +71,10 @@ final class ImpactDisplayState {
         return value;
     }
 
+    String logValue() {
+        return String.format(Locale.US, "n=%d, %.2f J", count, value);
+    }
+
     static boolean isValidLowReference(double reference) {
         return Double.isFinite(reference)
                 && reference >= LOW_REFERENCE_MIN

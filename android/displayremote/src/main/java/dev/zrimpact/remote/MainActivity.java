@@ -11,6 +11,9 @@ import android.net.NetworkRequest;
 import android.net.wifi.WifiNetworkSpecifier;
 import android.os.Build;
 import android.os.Bundle;
+import android.text.method.ScrollingMovementMethod;
+import android.view.HapticFeedbackConstants;
+import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.TextView;
@@ -26,6 +29,8 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.Locale;
 import java.util.Random;
 
@@ -37,7 +42,10 @@ public final class MainActivity extends Activity {
     private static final String NETWORK_APPROVED = "network_approved";
     private static final String LOW_REFERENCE = "low_reference";
     private static final String HIGH_REFERENCE = "high_reference";
+    private static final String ACTION_LOG = "action_log";
     private static final int SOCKET_TIMEOUT_MS = 5_000;
+    private static final DateTimeFormatter LOG_TIME_FORMAT =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss", Locale.US);
 
     private final Random random = new SecureRandom();
     private final DisplayConnectionState connectionState =
@@ -59,6 +67,7 @@ public final class MainActivity extends Activity {
     private EditText lowReferenceView;
     private EditText highReferenceView;
     private TextView statusView;
+    private TextView actionLogView;
     private Button defaultButton;
     private Button lowButton;
     private Button highButton;
@@ -71,6 +80,7 @@ public final class MainActivity extends Activity {
     private boolean connectionDefaultPending;
     private boolean reconnectScheduled;
     private boolean sending;
+    private DisplayActionLog actionLog;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -86,20 +96,50 @@ public final class MainActivity extends Activity {
         lowReferenceView = findViewById(R.id.low_reference);
         highReferenceView = findViewById(R.id.high_reference);
         statusView = findViewById(R.id.connection_status);
+        actionLogView = findViewById(R.id.action_log);
         defaultButton = findViewById(R.id.default_button);
         lowButton = findViewById(R.id.low_button);
         highButton = findViewById(R.id.high_button);
         zeroButton = findViewById(R.id.zero_button);
         sendButton = findViewById(R.id.send_button);
 
-        defaultButton.setOnClickListener(view -> sendState(ImpactDisplayState.ready()));
-        lowButton.setOnClickListener(view -> sendLow());
-        highButton.setOnClickListener(view -> sendHigh());
-        zeroButton.setOnClickListener(
-                view -> sendState(impactState.nextZero(random)));
-        sendButton.setOnClickListener(view -> queueCommand(
-                line1View.getText().toString(),
-                line2View.getText().toString()));
+        actionLog = DisplayActionLog.restore(
+                getSharedPreferences(PREFERENCES, MODE_PRIVATE)
+                        .getString(ACTION_LOG, ""));
+        actionLogView.setMovementMethod(new ScrollingMovementMethod());
+        renderActionLog();
+
+        defaultButton.setOnClickListener(view -> {
+            performButtonHaptic(view);
+            sendGeneratedState(
+                    getString(R.string.default_button),
+                    ImpactDisplayState.ready(),
+                    null);
+        });
+        lowButton.setOnClickListener(view -> {
+            performButtonHaptic(view);
+            sendLow();
+        });
+        highButton.setOnClickListener(view -> {
+            performButtonHaptic(view);
+            sendHigh();
+        });
+        zeroButton.setOnClickListener(view -> {
+            performButtonHaptic(view);
+            sendGeneratedState(
+                    getString(R.string.zero_button),
+                    impactState.nextZero(random),
+                    null);
+        });
+        sendButton.setOnClickListener(view -> {
+            performButtonHaptic(view);
+            String line1 = line1View.getText().toString();
+            String line2 = line2View.getText().toString();
+            appendActionLog(
+                    getString(R.string.send_button),
+                    line1 + " / " + line2);
+            queueCommand(line1, line2);
+        });
 
         lowReferenceView.setText(getSharedPreferences(PREFERENCES, MODE_PRIVATE)
                 .getString(
@@ -130,10 +170,16 @@ public final class MainActivity extends Activity {
         try {
             reference = Double.parseDouble(input);
         } catch (NumberFormatException exception) {
+            appendActionLog(
+                    getString(R.string.low_button),
+                    getString(R.string.log_invalid_reference));
             setStatus(R.string.low_reference_error, false);
             return;
         }
         if (!ImpactDisplayState.isValidLowReference(reference)) {
+            appendActionLog(
+                    getString(R.string.low_button),
+                    getString(R.string.log_invalid_reference));
             setStatus(R.string.low_reference_error, false);
             return;
         }
@@ -143,7 +189,10 @@ public final class MainActivity extends Activity {
                 .edit()
                 .putString(LOW_REFERENCE, normalized)
                 .apply();
-        sendState(impactState.nextLow(random, reference));
+        sendGeneratedState(
+                getString(R.string.low_button),
+                impactState.nextLow(random, reference),
+                normalized);
     }
 
     private void sendHigh() {
@@ -152,10 +201,16 @@ public final class MainActivity extends Activity {
         try {
             reference = Double.parseDouble(input);
         } catch (NumberFormatException exception) {
+            appendActionLog(
+                    getString(R.string.high_button),
+                    getString(R.string.log_invalid_reference));
             setStatus(R.string.high_reference_error, false);
             return;
         }
         if (!ImpactDisplayState.isValidHighReference(reference)) {
+            appendActionLog(
+                    getString(R.string.high_button),
+                    getString(R.string.log_invalid_reference));
             setStatus(R.string.high_reference_error, false);
             return;
         }
@@ -165,7 +220,46 @@ public final class MainActivity extends Activity {
                 .edit()
                 .putString(HIGH_REFERENCE, normalized)
                 .apply();
-        sendState(impactState.nextHigh(random, reference));
+        sendGeneratedState(
+                getString(R.string.high_button),
+                impactState.nextHigh(random, reference),
+                normalized);
+    }
+
+    private void sendGeneratedState(
+            String action,
+            ImpactDisplayState state,
+            String reference) {
+        String detail = state.logValue();
+        if (reference != null) {
+            detail += " (ref " + reference + ")";
+        }
+        appendActionLog(action, detail);
+        sendState(state);
+    }
+
+    private void performButtonHaptic(View view) {
+        view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+    }
+
+    private void appendActionLog(String action, String detail) {
+        actionLog.append(
+                LocalDateTime.now().format(LOG_TIME_FORMAT),
+                action,
+                detail);
+        getSharedPreferences(PREFERENCES, MODE_PRIVATE)
+                .edit()
+                .putString(ACTION_LOG, actionLog.serialize())
+                .apply();
+        renderActionLog();
+    }
+
+    private void renderActionLog() {
+        String text = actionLog.displayText();
+        actionLogView.setText(text.isEmpty()
+                ? getString(R.string.log_empty)
+                : text);
+        actionLogView.scrollTo(0, 0);
     }
 
     private void sendState(ImpactDisplayState state) {
