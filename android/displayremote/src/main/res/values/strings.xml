@@ -8,6 +8,7 @@
     <string name="status_connected">Connected to the Zero display network.</string>
     <string name="status_unavailable">The Zero display network is unavailable. Tap a command to retry.</string>
     <string name="status_lost">Zero disconnected. Tap a command to reconnect.</string>
+    <string name="status_retrying">Zero unavailable. Retrying in %1$d seconds…</string>
     <string name="status_sending">Sending display command…</string>
     <string name="status_accepted">Command accepted by Zero.</string>
     <string name="status_default_accepted">Connected; Default sent to Zero.</string>

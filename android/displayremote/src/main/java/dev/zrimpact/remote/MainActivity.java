@@ -33,7 +33,6 @@ public final class MainActivity extends Activity {
     private static final int NEARBY_PERMISSION_REQUEST = 1001;
     private static final String ZERO_ADDRESS = "10.77.0.1";
     private static final int ZERO_PORT = 8787;
-    private static final long RECONNECT_DELAY_MS = 2_000;
     private static final String PREFERENCES = "zr_display_remote";
     private static final String NETWORK_APPROVED = "network_approved";
     private static final String LOW_REFERENCE = "low_reference";
@@ -43,6 +42,14 @@ public final class MainActivity extends Activity {
     private final Random random = new SecureRandom();
     private final DisplayConnectionState connectionState =
             new DisplayConnectionState();
+    private final DisplayNetworkPolicy reconnectPolicy =
+            new DisplayNetworkPolicy();
+    private final Runnable reconnectRunnable = () -> {
+        reconnectScheduled = false;
+        if (!isFinishing() && !isDestroyed()) {
+            ensureDisplayNetwork();
+        }
+    };
     private ConnectivityManager connectivityManager;
     private ConnectivityManager.NetworkCallback networkCallback;
     private Network displayNetwork;
@@ -61,6 +68,7 @@ public final class MainActivity extends Activity {
     private boolean networkRequestInFlight;
     private boolean networkApproved;
     private boolean connectionDefaultPending;
+    private boolean reconnectScheduled;
     private boolean sending;
 
     @Override
@@ -183,6 +191,7 @@ public final class MainActivity extends Activity {
         pendingLine1 = line1;
         pendingLine2 = line2;
         if (displayNetwork == null) {
+            cancelScheduledReconnect();
             ensureDisplayNetwork();
             return;
         }
@@ -222,6 +231,8 @@ public final class MainActivity extends Activity {
                         return;
                     }
                     displayNetwork = network;
+                    cancelScheduledReconnect();
+                    reconnectPolicy.onConnected();
                     if (!networkApproved) {
                         networkApproved = true;
                         getSharedPreferences(PREFERENCES, MODE_PRIVATE)
@@ -244,11 +255,7 @@ public final class MainActivity extends Activity {
                         connectionDefaultPending = false;
                         resetNetworkRequest(this);
                         setStatus(R.string.status_lost, false);
-                        statusView.postDelayed(() -> {
-                            if (!isFinishing() && !isDestroyed()) {
-                                ensureDisplayNetwork();
-                            }
-                        }, RECONNECT_DELAY_MS);
+                        scheduleReconnect();
                     }
                 });
             }
@@ -259,11 +266,7 @@ public final class MainActivity extends Activity {
                     resetNetworkRequest(this);
                     setStatus(R.string.status_unavailable, false);
                     if (DisplayNetworkPolicy.shouldRetry(networkApproved)) {
-                        statusView.postDelayed(() -> {
-                            if (!isFinishing() && !isDestroyed()) {
-                                ensureDisplayNetwork();
-                            }
-                        }, RECONNECT_DELAY_MS);
+                        scheduleReconnect();
                     }
                 });
             }
@@ -277,7 +280,35 @@ public final class MainActivity extends Activity {
             networkRequestInFlight = false;
             networkCallback = null;
             setStatus(exception.getMessage(), false);
+            if (DisplayNetworkPolicy.shouldRetry(networkApproved)) {
+                scheduleReconnect();
+            }
         }
+    }
+
+    private void scheduleReconnect() {
+        if (reconnectScheduled
+                || networkRequestInFlight
+                || displayNetwork != null
+                || !BuildConfig.DISPLAY_AP_CONFIGURED) {
+            return;
+        }
+        long delayMillis = reconnectPolicy.nextReconnectDelayMillis();
+        reconnectScheduled = true;
+        setStatus(
+                getString(
+                        R.string.status_retrying,
+                        Math.max(1, delayMillis / 1_000)),
+                false);
+        statusView.postDelayed(reconnectRunnable, delayMillis);
+    }
+
+    private void cancelScheduledReconnect() {
+        if (!reconnectScheduled || statusView == null) {
+            return;
+        }
+        statusView.removeCallbacks(reconnectRunnable);
+        reconnectScheduled = false;
     }
 
     private void sendPendingCommand() {
@@ -420,7 +451,19 @@ public final class MainActivity extends Activity {
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        if (BuildConfig.DISPLAY_AP_CONFIGURED
+                && displayNetwork == null
+                && !networkRequestInFlight) {
+            cancelScheduledReconnect();
+            ensureDisplayNetwork();
+        }
+    }
+
+    @Override
     protected void onDestroy() {
+        cancelScheduledReconnect();
         if (networkCallback != null) {
             resetNetworkRequest(networkCallback);
         }
