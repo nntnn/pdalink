@@ -62,6 +62,7 @@ public final class MainActivity extends Activity {
     private Button defaultButton;
     private Button lowButton;
     private Button highButton;
+    private Button zeroButton;
     private Button sendButton;
     private String pendingLine1;
     private String pendingLine2;
@@ -88,11 +89,14 @@ public final class MainActivity extends Activity {
         defaultButton = findViewById(R.id.default_button);
         lowButton = findViewById(R.id.low_button);
         highButton = findViewById(R.id.high_button);
+        zeroButton = findViewById(R.id.zero_button);
         sendButton = findViewById(R.id.send_button);
 
         defaultButton.setOnClickListener(view -> sendState(ImpactDisplayState.ready()));
         lowButton.setOnClickListener(view -> sendLow());
         highButton.setOnClickListener(view -> sendHigh());
+        zeroButton.setOnClickListener(
+                view -> sendState(impactState.nextZero(random)));
         sendButton.setOnClickListener(view -> queueCommand(
                 line1View.getText().toString(),
                 line2View.getText().toString()));
@@ -432,6 +436,7 @@ public final class MainActivity extends Activity {
         defaultButton.setEnabled(active);
         lowButton.setEnabled(active);
         highButton.setEnabled(active);
+        zeroButton.setEnabled(active);
         sendButton.setEnabled(active);
         line1View.setEnabled(active);
         line2View.setEnabled(active);

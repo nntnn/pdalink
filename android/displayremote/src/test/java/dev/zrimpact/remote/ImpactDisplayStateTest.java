@@ -34,6 +34,25 @@ public class ImpactDisplayStateTest {
     }
 
     @Test
+    public void zeroChoosesOnlyZeroOrOneHundredthAndIncrementsCount() {
+        ImpactDisplayState state = ImpactDisplayState.ready();
+        Random random = new Random(12345L);
+        boolean sawZero = false;
+        boolean sawOneHundredth = false;
+
+        for (int index = 1; index <= 100; index++) {
+            state = state.nextZero(random);
+            assertEquals(index, state.count());
+            assertTrue(state.value() == 0.00 || state.value() == 0.01);
+            sawZero |= state.value() == 0.00;
+            sawOneHundredth |= state.value() == 0.01;
+        }
+
+        assertTrue(sawZero);
+        assertTrue(sawOneHundredth);
+    }
+
+    @Test
     public void highStaysWithinFourPercent() {
         ImpactDisplayState state = ImpactDisplayState.ready();
         Random random = new Random(12345L);

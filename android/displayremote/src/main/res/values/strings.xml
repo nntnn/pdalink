@@ -24,5 +24,6 @@
     <string name="default_button">Default</string>
     <string name="low_button">Low</string>
     <string name="high_button">High</string>
+    <string name="zero_button">Zero</string>
     <string name="send_button">Send</string>
 </resources>

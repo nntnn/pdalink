@@ -26,6 +26,13 @@ final class ImpactDisplayState {
         return new ImpactDisplayState(0, 0.0);
     }
 
+    ImpactDisplayState nextZero(Random random) {
+        if (random == null) {
+            throw new IllegalArgumentException("random is required");
+        }
+        return next(random.nextBoolean() ? 0.01 : 0.00);
+    }
+
     ImpactDisplayState nextLow(Random random, double reference) {
         if (!isValidLowReference(reference)) {
             throw new IllegalArgumentException("invalid low reference");

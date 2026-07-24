@@ -156,10 +156,21 @@
         </LinearLayout>
 
         <Button
+            android:id="@+id/zero_button"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:layout_marginTop="16dp"
+            android:backgroundTint="@color/button_background"
+            android:text="@string/zero_button"
+            android:textAllCaps="false"
+            android:textColor="@color/text_primary"
+            android:textSize="18sp" />
+
+        <Button
             android:id="@+id/send_button"
             android:layout_width="match_parent"
             android:layout_height="60dp"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="8dp"
             android:backgroundTint="@color/button_background"
             android:text="@string/send_button"
             android:textAllCaps="false"
