@@ -1712,7 +1712,59 @@ def usb_next_steps(
     return [f"run curl through http://{USB_HOST}:{local_port} or run python3 linux/pdalink_lite.py usb-smoke --no-start-android"]
 
 
+def connection_runtime_state(args: argparse.Namespace) -> SystemRuntimeState | None:
+    explicit = getattr(args, "state_file", "") or os.getenv("PDALINK_SYSTEM_STATE_FILE") or os.getenv("PDALINK_SYSTEM_STATE")
+    runtime = Path(os.getenv("PDALINK_RUNTIME_DIR", str(Path(__file__).resolve().parents[1] / ".tools/runtime")))
+    paths = [Path(explicit)] if explicit else [runtime / "pdalink-system.json", system_state_path("")]
+    for path in paths:
+        try:
+            state = load_system_state(path)
+        except ValueError:
+            continue
+        if state is not None:
+            return state
+    return None
+
+
+def remote_connection_status(args: argparse.Namespace, state: SystemRuntimeState) -> int:
+    config = state.config
+    host, port = proxy_host_port(config.proxy_url)
+    upstream_ok = False
+    try:
+        upstream = proxy_upstream_device(config)
+        upstream_ok = bool(config.upstream_device and upstream == config.upstream_device)
+    except (OSError, ValueError):
+        pass
+    pac_state, pac_detail = expected_pdalink_pac_status(host, port)
+    route = route_info(args.route_target)
+    internet = run_connection_probe(args.curl_url, args.curl_timeout)
+    checks = {
+        "device": {"ok": upstream_ok and process_matches_state(state),
+                   "detail": f"upstream {config.upstream_device or 'UNBOUND'}; state-tracked adapter"},
+        "forward": {"ok": True, "detail": "not required for remote proxy"},
+        "proxy": {"ok": pac_state == "active", "url": config.proxy_url, "detail": pac_detail},
+        "route": {"ok": bool(route and route.dev == config.iface), "target": args.route_target,
+                  "dev": route.dev if route else "", "detail": route.raw if route else "route unavailable"},
+        "internet": {"ok": internet.returncode == 0, "url": args.curl_url,
+                     "detail": (internet.stderr or internet.stdout).strip()},
+    }
+    base_ok = checks["device"]["ok"] and checks["proxy"]["ok"]
+    overall = ("connected" if base_ok and checks["route"]["ok"] and checks["internet"]["ok"]
+               else "degraded" if base_ok else "disconnected")
+    payload = {"overall": overall, "transport": {
+        "name": "wifi-direct" if host == DEFAULT_HOST else "remote-proxy",
+        "role": "internet-data"}, "checks": checks}
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print_connection_status(payload)
+    return 0 if overall == "connected" else 1
+
+
 def connection_status(args: argparse.Namespace) -> int:
+    state = connection_runtime_state(args)
+    if state is not None and not proxy_uses_loopback(state.config.proxy_url):
+        return remote_connection_status(args, state)
     checks: dict[str, dict[str, object]] = {}
     command = adb_command()
     if command is None:
@@ -1797,6 +1849,7 @@ def run_connection_probe(url: str, timeout: float) -> CommandResult:
 def print_connection_status(payload: dict[str, object]) -> None:
     print("PdaLink connection status")
     print(f"overall: {payload['overall']}")
+    print(f"transport: {payload['transport']['name']}")
     checks = payload["checks"]
     assert isinstance(checks, dict)
     for name in ("device", "forward", "proxy", "route", "internet"):
@@ -4404,6 +4457,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="show whether Ubuntu internet is currently using PdaLink",
     )
     add_usb_args(connection_status_parser)
+    connection_status_parser.add_argument("--state-file", default="", help="active system tunnel state; defaults to service runtime then /run")
     connection_status_parser.add_argument(
         "--route-target",
         default=os.getenv("PDALINK_CONNECTION_ROUTE_TARGET", "1.1.1.1"),

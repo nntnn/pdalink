@@ -108,3 +108,26 @@ def test_pac_response_requires_http_success_and_is_bounded():
                 pass
             else:
                 raise AssertionError('invalid PAC response accepted')
+
+def test_connection_status_uses_direct_without_adb_and_rejects_legacy_binding(tmp_path, capsys):
+    import dataclasses
+    import json
+    path = tmp_path / 'system.json'
+    args = lite.build_parser().parse_args(['connection-status', '--state-file', str(path), '--json'])
+    config = lite.SystemRouteConfig('pdalink0', '10.66.0.2/24', 1500, (), DIRECT_PROXY_URL,
+                                   upstream_device='wlan0')
+    with mock.patch.object(lite, 'proxy_upstream_device', return_value='wlan0'), mock.patch.object(
+            lite, 'process_matches_state', return_value=True), mock.patch.object(
+            lite, 'expected_pdalink_pac_status', return_value=('active', 'expected endpoint')), mock.patch.object(
+            lite, 'route_info', return_value=lite.parse_route_info('1.1.1.1 dev pdalink0')), mock.patch.object(
+            lite, 'run_connection_probe', return_value=lite.CommandResult(0, 'internet works', '')), mock.patch.object(
+            lite, 'adb_run') as adb:
+        lite.write_system_state(path, config)
+        assert lite.connection_status(args) == 0
+        result = json.loads(capsys.readouterr().out)
+        assert result['transport']['name'] == 'wifi-direct'
+        assert result['checks']['proxy']['url'] == DIRECT_PROXY_URL
+        adb.assert_not_called()
+        lite.write_system_state(path, dataclasses.replace(config, upstream_device=''))
+        assert lite.connection_status(args) == 1
+        assert json.loads(capsys.readouterr().out)['overall'] == 'disconnected'

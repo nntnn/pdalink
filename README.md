@@ -376,15 +376,15 @@ sudo ./tools/pdalink.sh system stop
 ```
 
 To check whether Ubuntu is actually using PdaLink for internet egress, use the
-connection status command. It combines the ADB device state, USB forward, local
-proxy probe, active route, and a direct internet probe:
+connection status command. It combines the active tunnel state, transport readiness (ADB forward or
+Direct Wi-Fi), proxy probe, active route, and a direct internet probe:
 
 ```bash
 ./tools/pdalink.sh connection status
 ./tools/pdalink.sh connection status --json
 ```
 
-`connected` means the USB tunnel is up, `pdalink0` is the active route for the
+`connected` means the selected tunnel is up, `pdalink0` is the active route for the
 probe target, and the internet probe succeeds. `degraded` means the tunnel is
 up but Ubuntu is not routing through `pdalink0` or the probe failed.
 `disconnected` means the local PdaLink path itself is not ready.

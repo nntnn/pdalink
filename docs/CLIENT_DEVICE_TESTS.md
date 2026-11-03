@@ -56,13 +56,15 @@ egress. Connectivity alone does not establish carrier billing treatment.
    ```bash
    ./tools/pdalink.sh wifi tunnel start --route-mode active_override --dns-mode resolved
    ./tools/pdalink.sh wifi tunnel status
+   ./tools/pdalink.sh connection status --json
    ip route get 1.1.1.1
    resolvectl status pdalink0
    curl -4 --noproxy '*' --fail --max-time 30 https://example.com/
    ```
 
    Expected: running state, `state-proxy: http://192.168.49.1:8001`,
-   `upstream-device: <Wi-Fi interface>`, internet route via `pdalink0`,
+   `upstream-device: <Wi-Fi interface>`, connection transport `wifi-direct`
+   with overall `connected`, internet route via `pdalink0`,
    per-link DNS `1.1.1.1 8.8.8.8` and `~.`, successful HTML. If Tailscale was
    already running, confirm fresh connectivity after its compatibility restart
    (`tailscale status`); inactive Tailscale must stay inactive.
@@ -297,7 +299,7 @@ browser/VPN/recovery behavior, not complete protocol coverage. None of these
 runbooks establish lossless stream migration or carrier billing guarantees.
 
 Offline verification in this worktree: `python3 -m pytest -q tests` produced
-297 passed, 6 skipped, and only the known
+298 passed, 6 skipped, and only the known
 `test_linux_install_dry_run_prints_udev_rules` failure (missing GTK dependencies).
 The offline Gradle command above passed 38 host and 5 client unit tests and
 assembled both debug APKs. The client APK contains the pinned native library
