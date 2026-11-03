@@ -8,7 +8,8 @@ Use the same saved host SSID/password throughout; do not rotate credentials.
 
 A pass requires new internet requests after every outage without reimporting the
 QR. Existing TCP streams may break. Allow 120 seconds after the host group is
-visible again (Android can need network approval again). Record prompts, OS
+visible again. The Android client must not ask for Wi-Fi approval again when
+the approved BSSID is unchanged. Record prompts, OS
 versions, elapsed recovery time and host cellular/fallback status. A timeout,
 rescan, manual VPN restart, route loop or stale cleanup is a fail for that case.
 Do not count another uplink as success: disable other client internet uplinks
@@ -244,9 +245,18 @@ No ADB connection is needed for normal client operation.
 1. On the client open PdaLink Client → Scan QR → scan the host Connection QR.
    Expected: saved SSID, transport Wi-Fi Direct and proxy `192.168.49.1:8001`.
    Tap Connect; grant requested Wi-Fi/location (older Android), notification,
-   network-selection and VPN approvals. Expected: Connected, foreground VPN
+   network-selection and VPN approvals. Grant precise location and enable system
+   Location so Android can disclose the connected AP's BSSID (including on
+   Android 13+); Nearby Wi-Fi permission alone does not disclose it.
+   Expected: Connected, foreground VPN
    notification and VPN indicator. The PAC must match the entire host template;
-   wrong endpoint/port or redirected PAC must not start the VPN.
+   wrong endpoint/port or redirected PAC must not start the VPN. Leave the
+   initial "Connect to device?" dialog open for more than 60 s before approving:
+   it must remain the same request, without a minute-by-minute replacement.
+   After approval the service saves the connected BSSID with its private profile.
+   A redacted `02:00:00:00:00:00`, malformed or missing BSSID must never be pinned;
+   fix location permission/settings and reconnect to learn a usable BSSID. With
+   redaction unresolved, SSID-only requests can still require approval.
 
 2. Turn off client mobile data and disconnect USB data. In a separate browser,
    load `https://example.com/?pdalink=1`, then `https://example.org/?pdalink=2`.
@@ -260,14 +270,32 @@ No ADB connection is needed for normal client operation.
    lockdown blocks the excluded physical proxy process. Return to the browser
    and repeat the new-page test. Lock/unlock the client and repeat.
 
-4. On the host stop **Wi-Fi Direct only**, wait 15 s, then start it again using
-   Connections → Wi-Fi Direct → Apply Wi-Fi mode. On the client expect a
-   starting/retrying notification and eventual Connected without Connect or a
-   rescan. Retry fresh browser requests within 120 s of the SSID returning.
-   Record any Android Wi-Fi reapproval prompt; do not hide it in the results.
-   Repeat with client Wi-Fi off/on, then with a host outage longer than 2 min.
-   Reconnect backoff is 5/10/20/40/60 s, capped at 60 s indefinitely; only one
-   native engine may run and stale callbacks must not create a second VPN.
+4. On the host stop **Wi-Fi Direct only**, wait 10–15 s, then start it again using
+   Connections → Wi-Fi Direct → Apply Wi-Fi mode. Keep the same SSID, password
+   and BSSID; a channel change (for example 2437 → 2462 MHz) is allowed.
+   On the client expect a starting/retrying notification and eventual Connected
+   **without any Wi-Fi approval dialog, Connect tap or rescan**. Retry fresh
+   browser requests within 120 s of the SSID returning and verify host cellular
+   egress. Record the BSSID, frequency, recovery time and any prompt; a prompt
+   for an unchanged learned BSSID fails this case.
+   Repeat with client Wi-Fi off/on. Pinned requests time out after 60 s and use
+   5/10/20/40/60 s backoff (capped at 60 s indefinitely). Only one Wi-Fi request
+   and one native engine may run; stale callbacks must not create a second VPN.
+
+   Separately test a changed group BSSID with unchanged credentials. After
+   **three consecutive pinned acquisition failures**, the old pin is cleared
+   and the next request is SSID-only: one approval dialog is acceptable. Allow
+   about 3 min 35 s from the first pinned request through all three timeouts and
+   the 5/10/20 s retries, plus time for Android discovery. Leave this dialog open
+   beyond 60 s: no app timeout may tear it down or stack another request. Approve,
+   then repeat a short outage with the new BSSID: recovery must again need no tap.
+   A long host outage can also exhaust the three attempts and require reapproval;
+   record it separately from the unchanged-pin short-outage acceptance case.
+
+   Import a new QR with a changed SSID, password or security mode: the old BSSID
+   must be cleared immediately, even before Connect. Connect and approve the
+   new group once, then verify no-dialog recovery. Reimporting identical Wi-Fi
+   credentials (or changing only the proxy endpoint) must preserve the pin.
 
 5. With Always-on enabled and the host ready, reboot and unlock the client:
 
@@ -278,9 +306,12 @@ No ADB connection is needed for normal client operation.
    ```
 
    Expected: VPN foreground notification/Connected returns from the stored
-   private service profile without opening the activity or scanning. Verify
+   private service profile and learned BSSID without opening the activity,
+   scanning or another Wi-Fi approval dialog. Verify
    new pages from the browser with mobile data still off. Repeat a client
-   reboot while the host is absent, then start host Direct and expect recovery.
+   reboot while the host is briefly absent, then start host Direct before the
+   three pinned failures and expect no-dialog recovery. For a longer absence,
+   verify the three-failure SSID-only fallback separately as in step 4.
    If USB is unavailable, reboot through the power menu and inspect the VPN UI.
 
 6. Disable Always-on in Settings, tap Disconnect in the client, then restart
@@ -306,3 +337,11 @@ assembled both debug APKs. The client APK contains the pinned native library
 for all four configured ABIs. `bash -n tools/pdalink.sh`, `git diff --check`,
 and the Direct `system-plan` review passed. Socket/route-loss tests use fakes;
 no live network, service, phone, Windows driver or billing result is claimed.
+
+Reconnect change verification: the requested offline
+`:client:testDebugUnitTest :client:assembleDebug :app:testDebugUnitTest` passed
+with 11 client tests and 38 host tests. Rebuilt with the shared read-only
+`PDALINK_TUN2PROXY_LIBS` path above for a device-ready client APK; without that
+variable this worktree's default native library directory was empty. Pytest
+again reported 298 passed, 6 skipped and only the same known GTK dependency
+failure. No device reconnect or approval behavior was exercised here.
