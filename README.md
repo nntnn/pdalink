@@ -16,6 +16,10 @@ Install on native Linux:
 For a fresh-machine walkthrough, including LLM-agent instructions and USB
 authorization branches, read `INSTALL.md`.
 
+Wi-Fi Direct is the recommended Wi-Fi transport for Android 10+ hosts: its
+saved SSID/password survive restart and reboot. For one-time QR onboarding and
+automatic recovery, see [fixed Direct groups](docs/WIFI_DIRECT_FIXED_GROUP.md).
+
 Start with:
 
 - `INSTALL.md`
@@ -213,16 +217,15 @@ still available at the stable `usb-PdaLink_Zero_2_W_Control_pdalink-zero2w-*`
 device path.
 
 `wifi connect` marks the NetworkManager profile as local-only
-(`never-default`, ignored auto DNS, IPv6 ignored, no autoconnect) so an active
+(`never-default`, ignored auto DNS, IPv6 ignored for manual joins) so an active
 USB tether or normal internet connection keeps the default route. Ubuntu may
 still show a "no internet" notification for the Direct SSID because that SSID is
 only the local phone link; it is harmless as long as `wifi status` shows the
 route to `192.168.49.1` on the Wi-Fi interface.
 
-If Ubuntu repeatedly prompts for the Wi-Fi password, the saved passphrase is
-probably stale. Start Wi-Fi Direct again on Android, copy the current password
-shown in the app, and rerun `./tools/pdalink.sh wifi connect --password '...'`;
-the wrapper updates the saved NetworkManager secret before reconnecting.
+QR-imported Direct profiles enable autoconnect with unlimited retries and disable
+IPv6 on that local link. Start/stop and band changes retain host credentials.
+After an explicit credential rotation, import the new Connection QR on each client.
 
 The cross-platform host contract and native helper status are tracked in
 `docs/HOST_AUTOMATION_PLAN.md`. Windows proxy and experimental Wintun helpers

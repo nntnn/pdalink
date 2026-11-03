@@ -1,3 +1,8 @@
+> Update 2026-11-03: [fixed-group reconnect](WIFI_DIRECT_FIXED_GROUP.md)
+> supersedes Q9/Q19's manual-only rule for clients that explicitly import the
+> host QR. Native peer negotiation remains a debug path; product clients join
+> the configured group as ordinary WPA2 stations.
+
 # Wi-Fi Direct Design With Grill-Me
 
 이 문서는 Wi-Fi Direct 경로를 진행하기 전에 `$grill-me` 방식으로 만든

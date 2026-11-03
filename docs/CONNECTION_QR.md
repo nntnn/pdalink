@@ -22,7 +22,8 @@ does not contain an ADB credential or proxy authentication token.
 
 ## Host
 
-1. Start Local Hotspot or Wi-Fi Direct in the PdaLink host app.
+1. Select the recommended Wi-Fi Direct mode and tap `Apply Wi-Fi mode`.
+   Local Hotspot remains available, with Android-managed rotating credentials.
 2. Open `Overview` and tap `Connection QR` in the active Wi-Fi section.
 3. Keep the dialog visible while the client scans it.
 
@@ -49,7 +50,18 @@ android/client/build/outputs/apk/debug/client-debug.apk
 Open `PdaLink Client`, scan the host QR, and tap `Connect`. Android presents a
 Wi-Fi network approval and a VPN approval. The client then verifies the host
 PAC before starting its TUN packet engine. `Disconnect` releases the VPN and
-the app-owned local Wi-Fi request.
+the app-owned local Wi-Fi request and disables automatic retry. The QR profile
+is retained privately, so reopening the app never requires another scan.
+
+While connected, the foreground service retries Wi-Fi loss, request timeout,
+PAC startup failure and tunnel exit, with a 5–60 second backoff. It verifies the
+PAC again before recreating the VPN. In Android Settings → VPN → PdaLink Client,
+enable **Always-on VPN** for client reboot recovery; leave **Block connections
+without VPN** off. VPN consent, Nearby Wi-Fi permission, and initial network
+approval still require the user. Reapproval can be needed when Android sees a
+new AP identity after host restart. Force-stop, revoked permissions and vendor
+battery restrictions can require reopening the client. See
+[platform limits and verification](WIFI_DIRECT_FIXED_GROUP.md).
 
 The Android client uses the pinned official `tun2proxy 0.8.2` Android release.
 Its HTTP CONNECT path carries TCP and virtual-DNS traffic. Generic UDP, QUIC,
@@ -60,7 +72,7 @@ IPv6, and ICMP are not guaranteed by the current PdaLink HTTP proxy contract.
 Scan with a camera and connect through NetworkManager:
 
 ```bash
-./tools/pdalink.sh connection import --camera
+./tools/pdalink.sh connection import --camera --internet
 ```
 
 Read an existing QR image:
@@ -86,10 +98,16 @@ access unprivileged and elevate only the import step:
 ./tools/scan_connection_qr.py --camera 0 | sudo python3 linux/pdalink_lite.py connection-import
 ```
 
-The import command creates or updates a local-only NetworkManager profile,
-connects it, and verifies the exact proxy PAC endpoint. It does not print the
-password. Existing `wifi env`, `wifi internet`, or `system` commands still
-control how Linux applications route through the verified proxy.
+Direct import creates/updates a NetworkManager profile with autoconnect enabled,
+unlimited retries, saved PSK, no default route, no DHCP DNS, and IPv6 disabled.
+NetworkManager rejoins after link loss and login/reboot. The password is never
+printed. `--internet` additionally persists a verified GNOME PAC with the existing
+private restore snapshot; GNOME proxy-aware apps resume new requests after
+reconnection without a PdaLink background process. Restore it with
+`./tools/pdalink.sh wifi internet stop --keep-wifi`. Import without `--internet`
+only joins/probes; non-GNOME desktops must configure the PAC in their own proxy
+settings. The GTK app still controls the separate USB supervisor.
+Local Hotspot imports retain their temporary credential policy.
 
 ## Windows 10
 
@@ -105,7 +123,7 @@ To join Wi-Fi and apply the verified PAC to the current user's WinINET proxy
 settings:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\tools\windows_connection_qr.ps1 -Camera -Action internet
+powershell -ExecutionPolicy Bypass -File .\tools\windows_connection_qr.ps1 -Camera
 ```
 
 Restore the previous WinINET settings and remove the owned WLAN profile with:
@@ -113,6 +131,14 @@ Restore the previous WinINET settings and remove the owned WLAN profile with:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tools\windows_wifi_direct_internet.ps1 stop
 ```
+
+The default action is `internet`: this is the one-time Windows entry point.
+It stores an automatic WLAN profile in Windows and a persistent per-user PAC.
+Both survive client reboot; new proxy-aware requests resume when WLAN rejoins.
+No script needs to remain running. `-Action connect` joins without changing PAC;
+`-Action show` only inspects the QR. Explicit stop removes the owned WLAN profile.
+If another Wi-Fi network takes priority, Windows may keep it until disconnected;
+OS Wi-Fi policy and radio availability still govern automatic selection.
 
 `-Action internet` affects proxy-aware Windows applications. It is not the
 administrator-level Wintun whole-system path. The URI and plaintext password

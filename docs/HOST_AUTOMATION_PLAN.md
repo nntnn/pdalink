@@ -1,5 +1,14 @@
 # Wi-Fi Direct Host Automation Plan
 
+## Fixed-group update
+
+[WIFI_DIRECT_FIXED_GROUP.md](WIFI_DIRECT_FIXED_GROUP.md) supersedes the manual-only
+onboarding policy for explicitly QR-imported Direct profiles. Linux import
+`--internet` persists GNOME PAC plus NetworkManager autoconnect; the Windows QR
+entry point defaults to PAC internet and an automatic WLAN profile. OS policy
+still governs network selection. Experimental Wintun reboot startup remains a
+separate unimplemented supervisor and is not the connect-once supported path.
+
 ## Goal
 
 Keep the Android Wi-Fi Direct proxy transport and remove per-application proxy
@@ -79,7 +88,7 @@ Acceptance:
 ### 2. Windows 10/11
 
 Stage 1 is implemented by `tools/windows_wifi_direct_internet.ps1` with
-`start|status|test|stop`. It creates a GUID-owned manual WPA2 WLAN profile from
+`start|status|test|stop`. It creates a GUID-owned automatic WPA2 WLAN profile from
 an `XmlWriter` document, accepts the password only as a `SecureString`, deletes
 the plaintext temporary XML in `finally`, and verifies the selected
 `192.168.49.x` route plus exact PAC before writing WinINET. State under the

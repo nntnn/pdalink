@@ -59,3 +59,94 @@ across client reboot and is not the supported connect-once entry point.
 
 All live network/phone/driver/service operations are deferred to manual testing.
 Automated checks use dummy credentials and fake command runners only.
+
+## Delivered behavior and remaining limits
+
+The host retries a missing group/channel every 15 seconds without touching the
+USB listener. Shutdown removes an owned group before clearing its ownership
+flag, avoiding a leftover group after Stop all. Saved credentials are committed before use; stop and band switch
+retain them. With Wi-Fi stopped, Connections → Rotate Wi-Fi Direct credentials
+requires an explicit confirmation and invalidates every old client QR. Initial
+creation or recovery from invalid/missing preferences also creates a pair.
+Do not use the native-peer debug invitation/negotiation path for fixed-group
+clients: that experimental path can negotiate platform credentials.
+
+Android client preferences are backup-disabled and private to the app. The UI
+stores its last import; only the isolated VPN process owns recovery intent and
+its service profile, avoiding shared preference writes between processes.
+Stale network/probe/native-exit callbacks cannot restart an obsolete generation.
+The native engine is stopped before retry and a new one waits for its predecessor
+to exit. Existing TCP streams still need application-level reconnection.
+
+No claim is made for whole-system Linux/Windows routing from QR import: PAC
+serves proxy-aware apps. Wintun reboot recovery and a mature full-tunnel data
+path remain outside the supported flow (ADR-0003/0004). Multiple clients share
+one group and proxy; actual S21+ station limits require the simultaneous test.
+OS policy may prefer another saved WLAN; unavailable radios, force-stop or
+user-denied approval cannot be overridden by PdaLink.
+
+The native Android dependency can be read from shared build tools without
+creating `.tools` here: export `PDALINK_TUN2PROXY_LIBS` to the pinned
+`android-deps/tun2proxy-0.8.2/tun2proxy-android-libs` directory before building.
+Unit tests do not load JNI, but a usable client APK must include these libraries.
+
+## Manual device verification (not performed by this change)
+
+1. Install the built host and client APKs manually on the intended phones. Keep
+   a recovery connection available. On the S21+, grant requested Wi-Fi and
+   notification permissions, turn on Wi-Fi/mobile data, open Connections,
+   select Wi-Fi Direct, and tap Apply Wi-Fi mode. Open Overview → Connection QR.
+   Compare QR/SSID privately; never paste passwords or QR URIs into test logs.
+2. On Linux with NetworkManager/GNOME, run once:
+   `./tools/pdalink.sh connection import --camera --internet`.
+   Grant NetworkManager authorization if prompted. On other desktops import
+   without `--internet` and set the desktop PAC to
+   `http://192.168.49.1:8001/proxy.pac` once. Test using
+   `./tools/pdalink.sh wifi internet test` on GNOME. Inspect the imported profile
+   in NetworkManager: autoconnect yes, retries 0, no default route/DHCP DNS,
+   IPv6 disabled. Ensure another connection still owns any physical default.
+3. On Windows 10 and 11, run once in the user's PowerShell:
+   `powershell -ExecutionPolicy Bypass -File .\tools\windows_connection_qr.ps1 -Camera`.
+   Install Python/OpenCV first if camera decoding is needed, or place the URI
+   on the clipboard and omit `-Camera`. Use the internet helper's `status` and
+   `test` actions; confirm the WLAN profile is automatic and WinINET uses the
+   fixed PAC. Wintun is not needed for this supported path.
+4. On the Android client, scan once, tap Connect, grant Wi-Fi/network/VPN
+   approvals, then enable Always-on VPN in Android's VPN settings (lockdown off).
+   Browse from another app. Close/reopen the activity and verify the saved
+   profile, without rescanning.
+5. With all three clients connected simultaneously, make requests on each.
+   On the host change band (test 2.4 GHz for broad compatibility), restart the
+   app/service, reboot and unlock, update the APK with the same signing key,
+   and toggle Wi-Fi off/on. After each event allow up to two minutes, confirm
+   the same SSID/PSK privately and successful new requests from every client.
+   Record any Android reapproval prompts instead of assuming they cannot occur.
+6. Reboot each client, log in/unlock, and verify new requests resume without
+   rescanning. Repeat after a long host outage and client sleep/resume. Android
+   must show its foreground VPN notification; Windows/Linux retain PAC settings.
+7. Stop all on the host and reboot: sharing must remain stopped. Start Direct
+   again: credentials must match. Stop Wi-Fi, explicitly rotate credentials,
+   start Direct and verify old profiles fail until the new QR is imported.
+   Declining the rotation dialog must preserve credentials.
+8. Independently verify the existing USB ADB forward to `127.0.0.1:8000` before,
+   during and after Wi-Fi start, band change, stop and rotation. Verify Direct
+   remains available when USB alone is stopped. Check Android tethering remains
+   off and proxy requests use the phone's app sockets/mobile egress.
+9. Test explicit cleanup: Android Disconnect stops retries, Windows internet
+   `stop` restores the proxy and removes its WLAN profile, Linux
+   `wifi internet stop --keep-wifi` restores the proxy while retaining the
+   imported autoconnect profile. Remove that saved profile through OS settings
+   to opt out of automatic joining entirely.
+
+## Offline results
+
+- Python discovery: 287 tests, 280 passed, 6 skipped (optional platform/GTK
+  dependencies), one known pre-existing failure:
+  `test_linux_install_dry_run_prints_udev_rules` (missing GTK packages).
+- Android offline build and both Java unit suites: 38 host + 1 client tests pass.
+  Client APK checked for pinned JNI libraries on arm64-v8a, armeabi-v7a, x86,
+  and x86_64. APKs were built, not installed.
+- `bash -n tools/pdalink.sh` and `git diff --check` pass.
+- No on-device, NetworkManager activation, service configuration, native Windows
+  or simultaneous-client test was performed. All require the manual procedure
+  above; hardware recovery is not marked verified by unit tests.
