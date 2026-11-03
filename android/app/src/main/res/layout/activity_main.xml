@@ -734,7 +734,6 @@
                             android:id="@+id/wifi_mode_off"
                             android:layout_width="match_parent"
                             android:layout_height="@dimen/touch_target"
-                            android:checked="true"
                             android:text="@string/wifi_off"
                             android:textColor="@color/text_primary" />
 
@@ -749,9 +748,16 @@
                             android:id="@+id/wifi_mode_direct"
                             android:layout_width="match_parent"
                             android:layout_height="@dimen/touch_target"
+                            android:checked="true"
                             android:text="@string/wifi_direct"
                             android:textColor="@color/text_primary" />
                     </RadioGroup>
+
+                    <Button
+                        android:id="@+id/rotate_wifi_credentials_button"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Rotate Wi-Fi Direct credentials" />
 
                     <LinearLayout
                         android:id="@+id/wifi_band_container"

@@ -353,6 +353,13 @@ public class MainActivity extends Activity {
         findViewById(R.id.refresh_button).setOnClickListener(
                 v -> sendServiceAction(ProxyActions.ACTION_REFRESH));
         findViewById(R.id.stop_all_button).setOnClickListener(v -> confirmStopAll());
+        findViewById(R.id.rotate_wifi_credentials_button).setOnClickListener(v ->
+                new AlertDialog.Builder(this)
+                        .setTitle("Rotate Wi-Fi Direct credentials?")
+                        .setMessage("Stop Wi-Fi first. All clients will need the new Connection QR.")
+                        .setPositiveButton("Rotate", (dialog, which) ->
+                                sendServiceAction(ProxyActions.ACTION_ROTATE_WIFI_DIRECT))
+                        .setNegativeButton(android.R.string.cancel, null).show());
         stopWifiButton.setOnClickListener(v -> sendServiceAction(ProxyActions.ACTION_STOP_WIFI));
 
         findViewById(R.id.apply_usb_mode_button).setOnClickListener(v -> {
@@ -1179,7 +1186,7 @@ public class MainActivity extends Activity {
             } else if (state.isWifiDirectActive()) {
                 wifiModeGroup.check(R.id.wifi_mode_direct);
             } else {
-                wifiModeGroup.check(R.id.wifi_mode_off);
+                wifiModeGroup.check(R.id.wifi_mode_direct);
             }
         }
         wifiBandContainer.setVisibility(

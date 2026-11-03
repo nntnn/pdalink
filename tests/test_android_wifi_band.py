@@ -42,9 +42,16 @@ class AndroidWifiBandContractTest(unittest.TestCase):
         self.assertIn("loadOrCreateGroupCredentials()", self.service)
         self.assertIn("PREF_WIFI_DIRECT_SSID", self.service)
         self.assertIn("PREF_WIFI_DIRECT_PASSPHRASE", self.service)
-        self.assertIn('^DIRECT-PD-PdaLink-', self.service)
+        self.assertIn('^DIRECT-PD-PdaLink-', (JAVA / 'WifiDirectCredentials.java').read_text())
+        self.assertIn('WifiDirectCredentials.valid(ssid, passphrase)', self.service)
         self.assertIn("WifiDirectBand.matchesFrequency(requestedWifiBand, frequencyMhz)", self.service)
         self.assertIn("recreateGroupForRequestedBand(frequencyMhz)", self.service)
+
+    def test_shutdown_removes_owned_group_before_forgetting_ownership(self):
+        shutdown = self.service[self.service.index("public void onDestroy()"):
+                                self.service.index("public IBinder onBind")]
+        self.assertLess(shutdown.index("removeWifiGroupBestEffort()"),
+                        shutdown.index("wifiGroupOwned = false"))
 
     def test_requested_and_actual_band_are_reported(self):
         self.assertIn("EXTRA_WIFI_BAND", self.actions)

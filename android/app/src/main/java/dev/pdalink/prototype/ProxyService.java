@@ -59,6 +59,16 @@ public class ProxyService extends Service {
     private static final long WIFI_DIRECT_CLIENT_DROP_RECOVERY_DELAY_MS = 45000L;
     private static final long WIFI_DIRECT_NATIVE_NEGOTIATION_TIMEOUT_MS = 35000L;
 
+    private final Runnable groupWatchdog = new Runnable() {
+        @Override public void run() {
+            if (wifiDirectEnabled && !wifiGroupOperationInProgress) {
+                if (!wifiGroupOwned) createGroup();
+                else requestGroupInfo();
+            }
+            mainHandler.postDelayed(this, 15000L);
+        }
+    };
+
     private enum Mode {USB, PRODUCT_USB, WIFI_DIRECT, LOCAL_HOTSPOT}
 
     private volatile HttpProxyServer usbProxyServer;
@@ -107,6 +117,7 @@ public class ProxyService extends Service {
         createNotificationChannel();
         startForegroundCompat("PdaLink starting");
         mainHandler = new Handler(getMainLooper());
+        mainHandler.postDelayed(groupWatchdog, 15000L);
         requestedWifiBand = WifiDirectBand.load(this);
         Mode savedMode = loadSavedMode();
         if (savedMode == Mode.WIFI_DIRECT || savedMode == Mode.LOCAL_HOTSPOT) {
@@ -163,6 +174,20 @@ public class ProxyService extends Service {
                 start.run();
             }
             status("Transports " + modeLabel() + " active");
+            return START_STICKY;
+        }
+        if (ProxyActions.ACTION_ROTATE_WIFI_DIRECT.equals(action)) {
+            // Rotation is allowed only while stopped, so no active/foreign group is removed.
+            if (wifiDirectEnabled || wifiGroupOperationInProgress) {
+                status("Stop Wi-Fi Direct before rotating credentials");
+            } else {
+                getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                        .remove(PREF_WIFI_DIRECT_SSID)
+                        .remove(PREF_WIFI_DIRECT_PASSPHRASE).commit();
+                loadOrCreateGroupCredentials();
+                status("Wi-Fi Direct credentials rotated; clients must import the new QR");
+            }
+            updateNotification();
             return START_STICKY;
         }
         if (ProxyActions.ACTION_INVITE_WIFI_DIRECT_PEER.equals(action)) {
@@ -276,7 +301,6 @@ public class ProxyService extends Service {
         LocalHotspotDebugState.clear();
         wifiDirectEnabled = false;
         localHotspotEnabled = false;
-        wifiGroupOwned = false;
         wifiGroupClientCount = 0;
         if (mainHandler != null) {
             mainHandler.removeCallbacksAndMessages(null);
@@ -284,6 +308,7 @@ public class ProxyService extends Service {
         if (wifiP2pManager != null && wifiP2pChannel != null) {
             removeWifiGroupBestEffort();
         }
+        wifiGroupOwned = false;
         closeLocalHotspotReservation();
         clearWifiReceiver();
         closeWifiProxyServer();
@@ -385,7 +410,14 @@ public class ProxyService extends Service {
             return;
         }
         wifiP2pChannel = wifiP2pManager.initialize(this, getMainLooper(),
-                () -> status("Wi-Fi Direct channel disconnected"));
+                () -> {
+                    status("Wi-Fi Direct channel disconnected; waiting to retry");
+                    wifiP2pChannel = null;
+                    wifiGroupOperationInProgress = false;
+                    wifiGroupOwned = false;
+                    closeWifiProxyServer();
+                    clearWifiReceiver();
+                });
         if (wifiP2pChannel == null) {
             status("Wi-Fi Direct channel initialization failed");
             return;
@@ -1567,28 +1599,18 @@ public class ProxyService extends Service {
         if (validGroupCredentials(ssid, passphrase)) {
             return new String[]{ssid, passphrase};
         }
-        SecureRandom random = new SecureRandom();
-        ssid = "DIRECT-PD-PdaLink-" + randomToken(random, 6);
-        passphrase = randomToken(random, 16);
+        String[] generated = WifiDirectCredentials.create(new SecureRandom());
+        ssid = generated[0];
+        passphrase = generated[1];
         preferences.edit()
                 .putString(PREF_WIFI_DIRECT_SSID, ssid)
                 .putString(PREF_WIFI_DIRECT_PASSPHRASE, passphrase)
-                .apply();
+                .commit();
         return new String[]{ssid, passphrase};
     }
 
     private boolean validGroupCredentials(String ssid, String passphrase) {
-        return ssid.matches("^DIRECT-PD-PdaLink-[A-Za-z0-9]{6}$")
-                && passphrase.matches("^[ -~]{8,63}$");
-    }
-
-    private String randomToken(SecureRandom random, int length) {
-        String alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
-        StringBuilder token = new StringBuilder(length);
-        for (int index = 0; index < length; index++) {
-            token.append(alphabet.charAt(random.nextInt(alphabet.length())));
-        }
-        return token.toString();
+        return WifiDirectCredentials.valid(ssid, passphrase);
     }
 
     private void updateNotification() {
@@ -1912,7 +1934,7 @@ public class ProxyService extends Service {
         getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
                 .edit()
                 .putBoolean(PREF_WIFI_DIRECT_ENABLED, enabled)
-                .apply();
+                .commit();
     }
 
     private void setLocalHotspotEnabled(boolean enabled) {

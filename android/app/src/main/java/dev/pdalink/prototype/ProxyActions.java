@@ -5,6 +5,7 @@ final class ProxyActions {
     static final String ACTION_START_USB = "dev.pdalink.prototype.START_USB";
     static final String ACTION_STOP_USB = "dev.pdalink.prototype.STOP_USB";
     static final String ACTION_START_PRODUCT_USB = "dev.pdalink.prototype.START_PRODUCT_USB";
+    static final String ACTION_ROTATE_WIFI_DIRECT = "dev.pdalink.prototype.ROTATE_WIFI_DIRECT";
     static final String ACTION_START_WIFI_DIRECT = "dev.pdalink.prototype.START_WIFI_DIRECT";
     static final String ACTION_INVITE_WIFI_DIRECT_PEER =
             "dev.pdalink.prototype.INVITE_WIFI_DIRECT_PEER";
