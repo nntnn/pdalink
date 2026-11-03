@@ -45,6 +45,13 @@ class WindowsToolScriptTest(unittest.TestCase):
         self.assertIn("PdaLink-WiFi-Direct-[0-9a-f]{32}", common)
         self.assertNotIn("Invoke-Expression", common)
 
+    def test_direct_helpers_avoid_empty_native_arguments_on_windows_powershell(self):
+        for name in ("windows_wifi_direct_internet.ps1", "windows_wifi_direct_tunnel.ps1"):
+            script = (ROOT / "tools" / name).read_text()
+            self.assertNotIn('--proxy ""', script)
+            self.assertNotIn('--noproxy ""', script)
+            self.assertIn('--noproxy "pdalink-no-bypass.invalid"', script)
+
     def test_wintun_pins_upstream_interface_across_route_loss(self):
         script = (ROOT / "tools/windows_wifi_direct_tunnel.ps1").read_text()
         backend = (ROOT / "windows/pdalink_wintun.py").read_text()
@@ -70,7 +77,7 @@ class WindowsToolScriptTest(unittest.TestCase):
         self.assertIn("GetLastWin32Error", script)
         self.assertIn("DoNotExpandEnvironmentNames", script)
         self.assertIn("[IO.File]::ReadAllText", script)
-        self.assertIn('--proxy $proxyUrl --noproxy ""', script)
+        self.assertIn('--proxy $proxyUrl --noproxy "pdalink-no-bypass.invalid"', script)
         self.assertIn("Rolling back failed Wi-Fi Direct proxy start", script)
         self.assertIn("restore state retained", script)
         self.assertIn('state = "drifted"', script)
@@ -129,7 +136,7 @@ class WindowsToolScriptTest(unittest.TestCase):
         self.assertIn('SplitRoutes = @("0.0.0.0/1", "128.0.0.0/1")', script)
         self.assertIn('HostRoute = "$ProxyAddress/32"', script)
         self.assertIn("split routes captured the Android proxy connection", script)
-        self.assertIn('--proxy "" --noproxy "*" -4', script)
+        self.assertIn('--noproxy "*" -4', script)
         self.assertIn("Resolve-DnsName", script)
         self.assertIn('-Server $DnsServers[0]', script)
         self.assertIn("configured DNS server route", script)

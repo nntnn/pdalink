@@ -533,7 +533,7 @@ function Test-PdaLinkTransparentInternet {
     param([Parameter(Mandatory = $true)][int]$ExpectedTunnelInterfaceIndex)
 
     Write-Host "Testing IPv4 TCP without a process or system proxy..."
-    & curl.exe --silent --show-error --fail --max-time 30 --proxy "" --noproxy "*" -4 $Url | Out-Host
+    & curl.exe --silent --show-error --fail --max-time 30 --noproxy "*" -4 $Url | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "transparent IPv4 TCP test failed for $Url"
     }
@@ -720,7 +720,8 @@ function Start-PdaLinkWifiDirectTunnel {
 
         Write-PdaLinkStep "Verifying Wi-Fi Direct route, PAC, and explicit proxy"
         $endpoint = Test-PdaLinkWifiDirectEndpoint -Interface $Interface
-        & curl.exe --silent --show-error --fail --max-time 30 --proxy $ProxyUrl --noproxy "" $Url | Out-Host
+        # Windows PowerShell drops empty native arguments; override NO_PROXY with a nonmatching name.
+        & curl.exe --silent --show-error --fail --max-time 30 --proxy $ProxyUrl --noproxy "pdalink-no-bypass.invalid" $Url | Out-Host
         if ($LASTEXITCODE -ne 0) {
             throw "explicit Android proxy test failed before route mutation"
         }

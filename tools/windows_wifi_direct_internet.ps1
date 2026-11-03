@@ -283,7 +283,8 @@ function Read-PdaLinkProxyState {
 
 function Invoke-PdaLinkExplicitProxyTest {
     $proxyUrl = "http://$ExpectedProxyEndpoint"
-    & curl.exe --silent --show-error --fail --max-time 30 --proxy $proxyUrl --noproxy "" $Url | Out-Host
+    # Windows PowerShell drops empty native arguments; override NO_PROXY with a nonmatching name.
+    & curl.exe --silent --show-error --fail --max-time 30 --proxy $proxyUrl --noproxy "pdalink-no-bypass.invalid" $Url | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "explicit Wi-Fi Direct proxy test failed for $Url"
     }
