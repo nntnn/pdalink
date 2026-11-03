@@ -386,7 +386,15 @@ public final class PdaLinkVpnService extends VpnService {
             shutdown(getString(R.string.status_error), getString(R.string.vpn_setup_failed));
             return;
         }
+        ParcelFileDescriptor previous = vpnInterface;
         vpnInterface = builder.establish();
+        if (previous != null) {
+            // tun2proxy exited on its own; the new interface replaced the old one.
+            try {
+                previous.close();
+            } catch (IOException ignored) {
+            }
+        }
         if (vpnInterface == null) {
             shutdown(getString(R.string.status_error), getString(R.string.vpn_setup_failed));
             return;
