@@ -6,17 +6,22 @@ TOOLS_DIR="$ROOT/.tools"
 SDK_DIR="$TOOLS_DIR/android-sdk"
 GRADLE_DIR="$TOOLS_DIR/gradle"
 CACHE_DIR="$TOOLS_DIR/cache"
+ANDROID_DEPS_DIR="$TOOLS_DIR/android-deps"
 LOCAL_JDK="$TOOLS_DIR/jdk/temurin-17"
 
 PLATFORM_TOOLS_URL="${PLATFORM_TOOLS_URL:-https://dl.google.com/android/repository/platform-tools-latest-linux.zip}"
 CMDLINE_TOOLS_URL="${CMDLINE_TOOLS_URL:-https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip}"
 GRADLE_URL="${GRADLE_URL:-https://services.gradle.org/distributions/gradle-8.10.2-bin.zip}"
+ZXING_CORE_URL="${ZXING_CORE_URL:-https://repo1.maven.org/maven2/com/google/zxing/core/3.5.3/core-3.5.3.jar}"
+TUN2PROXY_ANDROID_URL="${TUN2PROXY_ANDROID_URL:-https://github.com/tun2proxy/tun2proxy/releases/download/v0.8.2/tun2proxy-android-libs.zip}"
 PLATFORM_TOOLS_SHA256="${PLATFORM_TOOLS_SHA256:-}"
 CMDLINE_TOOLS_SHA256="${CMDLINE_TOOLS_SHA256:-2d2d50857e4eb553af5a6dc3ad507a17adf43d115264b1afc116f95c92e5e258}"
 GRADLE_SHA256="${GRADLE_SHA256:-31c55713e40233a8303827ceb42ca48a47267a0ad4bab9177123121e71524c26}"
+ZXING_CORE_SHA256="${ZXING_CORE_SHA256:-8d8064c1636fdaef7189dd9055c7d59950a8940a12f2293956446ec3c109fd82}"
+TUN2PROXY_ANDROID_SHA256="${TUN2PROXY_ANDROID_SHA256:-903f8b780743df5a22ba44e50e1b02cbb0a190ac252ffb03c84d75ef9c0754a9}"
 TEMURIN17_SHA256="${TEMURIN17_SHA256:-}"
 
-mkdir -p "$SDK_DIR" "$GRADLE_DIR" "$CACHE_DIR"
+mkdir -p "$SDK_DIR" "$GRADLE_DIR" "$CACHE_DIR" "$ANDROID_DEPS_DIR"
 
 java_major_version() {
   java -XshowSettings:properties -version 2>&1 \
@@ -142,6 +147,20 @@ rm -rf "$CACHE_DIR/cmdline-tools-unpack"
 download "$GRADLE_URL" "$CACHE_DIR/gradle-8.10.2-bin.zip" "$GRADLE_SHA256"
 if [[ ! -x "$GRADLE_DIR/gradle-8.10.2/bin/gradle" ]]; then
   unzip -q "$CACHE_DIR/gradle-8.10.2-bin.zip" -d "$GRADLE_DIR"
+fi
+
+download "$ZXING_CORE_URL" "$ANDROID_DEPS_DIR/core-3.5.3.jar" "$ZXING_CORE_SHA256"
+
+TUN2PROXY_ARCHIVE="$CACHE_DIR/tun2proxy-android-libs-0.8.2.zip"
+TUN2PROXY_DIR="$ANDROID_DEPS_DIR/tun2proxy-0.8.2"
+download "$TUN2PROXY_ANDROID_URL" "$TUN2PROXY_ARCHIVE" "$TUN2PROXY_ANDROID_SHA256"
+if [[ ! -f "$TUN2PROXY_DIR/.complete" ]]; then
+  rm -rf "$TUN2PROXY_DIR"
+  mkdir -p "$TUN2PROXY_DIR"
+  unzip -q "$TUN2PROXY_ARCHIVE" \
+    'tun2proxy-android-libs/*/libtun2proxy.so' \
+    -d "$TUN2PROXY_DIR"
+  touch "$TUN2PROXY_DIR/.complete"
 fi
 
 export ANDROID_HOME="$SDK_DIR"

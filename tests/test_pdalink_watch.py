@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,10 +28,21 @@ def is_service_call(command, action):
 
 
 class FakeRunner:
-    def __init__(self, devices: str, forwards: str = "", service_running: bool = False):
+    def __init__(
+        self,
+        devices: str,
+        forwards: str = "",
+        service_running: bool = False,
+        service_healthy: bool = True,
+        hotspot_result=None,
+        target_result=None,
+    ):
         self.devices = devices
         self.forwards = forwards
         self.service_running = service_running
+        self.service_healthy = service_healthy
+        self.hotspot_result = hotspot_result
+        self.target_result = target_result
         self.calls = []
 
     def run(self, command, timeout):
@@ -42,16 +54,21 @@ class FakeRunner:
         if command[:3] == ["/adb", "-s", "R3CR406AAGE"] and command[3:] == ["forward", "tcp:18080", "tcp:8000"]:
             self.forwards = "R3CR406AAGE tcp:18080 tcp:8000\n"
             return pdalink_watch.CommandResult(0, "", "")
-        if command == ["/adb", "forward", "--remove", "tcp:18080"]:
+        if command in (
+            ["/adb", "forward", "--remove", "tcp:18080"],
+            ["/adb", "-s", "R3CR406AAGE", "forward", "--remove", "tcp:18080"],
+        ):
             self.forwards = ""
             return pdalink_watch.CommandResult(0, "", "")
         if command[:3] == ["/adb", "-s", "R3CR406AAGE"] and command[3:6] == ["shell", "am", "start-foreground-service"]:
             return pdalink_watch.CommandResult(0, "Starting service: Intent\n", "")
         if "local-hotspot-sync" in command:
-            return pdalink_watch.CommandResult(0, "local-hotspot: inactive\n", "")
+            return self.hotspot_result or pdalink_watch.CommandResult(0, "local-hotspot: inactive\n", "")
+        if "local-hotspot-target-sync" in command:
+            return self.target_result or pdalink_watch.CommandResult(0, "local-hotspot target: updated\n", "")
         if is_service_call(command, "status"):
             stdout = "wrapper: RUNNING pid 123\n" if self.service_running else "wrapper: MISSING .tools/runtime/pdalink-system.pid\n"
-            return pdalink_watch.CommandResult(0, stdout, "")
+            return pdalink_watch.CommandResult(0 if self.service_healthy else 1, stdout, "route: MISSING" if not self.service_healthy else "")
         if is_service_call(command, "start"):
             self.service_running = True
             return pdalink_watch.CommandResult(0, "service: running\n", "")
@@ -115,6 +132,7 @@ class PdaLinkWatchTest(unittest.TestCase):
             verify_timeout=0,
             trusted_devices_file=trusted_file,
             config_file=config_file,
+            enable_dbus=False,
         )
 
     def make_product_usb_config(self, state_file, product_state_file):
@@ -134,6 +152,7 @@ class PdaLinkWatchTest(unittest.TestCase):
             config_file=config_file,
             transport="product-usb",
             product_usb_state_file=product_state_file,
+            enable_dbus=False,
         )
 
     def write_product_usb_ready_state(self, path):
@@ -201,6 +220,68 @@ class PdaLinkWatchTest(unittest.TestCase):
             self.assertEqual(len(sync_calls), 1)
             self.assertIn("auto", sync_calls[0])
             self.assertIn("R3CR406AAGE", sync_calls[0])
+
+    def test_if_disconnected_join_does_not_displace_unrelated_wifi(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "watch.json"
+            config = self.make_config(state_file)
+            user_config = json.loads(config.config_file.read_text(encoding="utf-8"))
+            user_config.update({
+                "local_hotspot_credentials": "auto",
+                "local_hotspot_join": "if_disconnected",
+            })
+            config.config_file.write_text(json.dumps(user_config), encoding="utf-8")
+            runner = FakeRunner(authorized_devices())
+            watcher = pdalink_watch.PdaLinkWatcher(
+                config,
+                runner=runner,
+                probe=ok_probe,
+                stdout=io.StringIO(),
+            )
+
+            with mock.patch.object(
+                pdalink_watch.pdalink_lite,
+                "active_nm_connections",
+                return_value=[pdalink_watch.pdalink_lite.NmActiveConnection(
+                    "office-wifi", "802-11-wireless", "wlp1s0"
+                )],
+            ):
+                self.assertEqual(watcher.reconcile(), 0)
+
+            sync_call = next(call for call in runner.calls if "local-hotspot-sync" in call)
+            self.assertNotIn("--connect", sync_call)
+
+    def test_if_disconnected_join_connects_when_only_managed_wifi_is_active(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "watch.json"
+            config = self.make_config(state_file)
+            user_config = json.loads(config.config_file.read_text(encoding="utf-8"))
+            user_config.update({
+                "local_hotspot_credentials": "auto",
+                "local_hotspot_join": "if_disconnected",
+                "local_hotspot_target": "pdalink-zero",
+            })
+            config.config_file.write_text(json.dumps(user_config), encoding="utf-8")
+            runner = FakeRunner(authorized_devices())
+            watcher = pdalink_watch.PdaLinkWatcher(
+                config,
+                runner=runner,
+                probe=ok_probe,
+                stdout=io.StringIO(),
+            )
+
+            with mock.patch.object(
+                pdalink_watch.pdalink_lite,
+                "active_nm_connections",
+                return_value=[pdalink_watch.pdalink_lite.NmActiveConnection(
+                    "pdalink-local-hotspot", "802-11-wireless", "wlp1s0"
+                )],
+            ):
+                self.assertEqual(watcher.reconcile(), 0)
+
+            sync_call = next(call for call in runner.calls if "local-hotspot-sync" in call)
+            self.assertIn("--connect", sync_call)
+            self.assertNotIn("--target", sync_call)
 
     def test_product_usb_once_starts_guarded_system_service_without_adb(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -344,6 +425,111 @@ class PdaLinkWatchTest(unittest.TestCase):
             self.assertTrue(any(call[-2:] == ["-a", "dev.pdalink.prototype.START_USB"] for call in runner.calls))
             self.assertTrue(any(is_service_call(call, "start") for call in runner.calls))
 
+    def test_stale_owned_forward_is_recreated_in_same_reconcile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "watch.json"
+            pdalink_watch.WatchState(
+                mode="ready",
+                device_serial="R3CR406AAGE",
+                device_state="device",
+                forward_owned=True,
+                service_owned=False,
+                local_port=18080,
+                remote_port=8000,
+                proxy_url="http://127.0.0.1:18080",
+            ).save(state_file)
+            runner = FakeRunner(
+                authorized_devices(),
+                "R3CR406AAGE tcp:18080 tcp:8000\n",
+            )
+            watcher = pdalink_watch.PdaLinkWatcher(
+                self.make_config(state_file),
+                runner=runner,
+                probe=SequenceProbe(
+                    pdalink_watch.ProxyCheck(False, "connection refused"),
+                    pdalink_watch.ProxyCheck(False, "stale forward"),
+                    pdalink_watch.ProxyCheck(True, "HTTP 200"),
+                ),
+                stdout=io.StringIO(),
+            )
+
+            self.assertEqual(watcher.reconcile(), 0)
+
+            remove = ["/adb", "-s", "R3CR406AAGE", "forward", "--remove", "tcp:18080"]
+            create = ["/adb", "-s", "R3CR406AAGE", "forward", "tcp:18080", "tcp:8000"]
+            self.assertIn(remove, runner.calls)
+            self.assertIn(create, runner.calls)
+            payload = json.loads(state_file.read_text(encoding="utf-8"))
+            self.assertEqual(payload["health"]["forward"], "repaired")
+
+    def test_owned_unhealthy_system_service_is_restarted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "watch.json"
+            pdalink_watch.WatchState(
+                mode="ready",
+                device_serial="R3CR406AAGE",
+                device_state="device",
+                forward_owned=True,
+                service_owned=True,
+                local_port=18080,
+                remote_port=8000,
+                proxy_url="http://127.0.0.1:18080",
+            ).save(state_file)
+            runner = FakeRunner(
+                authorized_devices(),
+                "R3CR406AAGE tcp:18080 tcp:8000\n",
+                service_running=True,
+                service_healthy=False,
+            )
+            watcher = pdalink_watch.PdaLinkWatcher(
+                self.make_config(state_file),
+                runner=runner,
+                probe=ok_probe,
+                stdout=io.StringIO(),
+            )
+
+            self.assertEqual(watcher.reconcile(), 0)
+
+            stop_index = next(index for index, call in enumerate(runner.calls) if is_service_call(call, "stop"))
+            start_index = next(index for index, call in enumerate(runner.calls) if is_service_call(call, "start"))
+            self.assertLess(stop_index, start_index)
+
+    def test_target_relay_failure_does_not_fail_local_hotspot_or_usb(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "watch.json"
+            config = self.make_config(state_file)
+            user_config = json.loads(config.config_file.read_text(encoding="utf-8"))
+            user_config.update({
+                "local_hotspot_credentials": "auto",
+                "local_hotspot_target": "pdalink-zero",
+            })
+            config.config_file.write_text(json.dumps(user_config), encoding="utf-8")
+            fingerprint = "a" * 64
+            runner = FakeRunner(
+                authorized_devices(),
+                hotspot_result=pdalink_watch.CommandResult(
+                    0,
+                    f"local-hotspot: updated\ncredential-fingerprint: {fingerprint}\n",
+                    "",
+                ),
+                target_result=pdalink_watch.CommandResult(1, "", "ssh target unavailable"),
+            )
+            watcher = pdalink_watch.PdaLinkWatcher(
+                config,
+                runner=runner,
+                probe=ok_probe,
+                stdout=io.StringIO(),
+            )
+
+            self.assertEqual(watcher.reconcile(), 0)
+
+            payload = json.loads(state_file.read_text(encoding="utf-8"))
+            self.assertEqual(payload["mode"], "ready")
+            self.assertEqual(payload["health"]["hotspot"], "ready")
+            self.assertIn("ssh target unavailable", payload["health"]["hotspot_target"])
+            self.assertEqual(payload["hotspot_credential_fingerprint"], fingerprint)
+            self.assertEqual(payload["hotspot_relay_fingerprint"], "")
+
     def test_unauthorized_device_stops_owned_service_and_forward(self):
         with tempfile.TemporaryDirectory() as tmp:
             state_file = Path(tmp) / "watch.json"
@@ -369,7 +555,7 @@ class PdaLinkWatchTest(unittest.TestCase):
             self.assertEqual(watcher.reconcile(), 1)
 
             self.assertTrue(any(is_service_call(call, "stop") for call in runner.calls))
-            self.assertIn(["/adb", "forward", "--remove", "tcp:18080"], runner.calls)
+            self.assertIn(["/adb", "-s", "R3CR406AAGE", "forward", "--remove", "tcp:18080"], runner.calls)
             self.assertFalse(any(call[-2:] == ["-a", "dev.pdalink.prototype.START_USB"] for call in runner.calls))
 
             payload = json.loads(state_file.read_text(encoding="utf-8"))
@@ -406,7 +592,7 @@ class PdaLinkWatchTest(unittest.TestCase):
 
             self.assertEqual(watcher.reconcile(), 1)
 
-            self.assertIn(["/adb", "forward", "--remove", "tcp:18080"], runner.calls)
+            self.assertIn(["/adb", "-s", "R3CR406AAGE", "forward", "--remove", "tcp:18080"], runner.calls)
             self.assertFalse(any(is_service_call(call, "start") for call in runner.calls))
             payload = json.loads(state_file.read_text(encoding="utf-8"))
             self.assertEqual(payload["mode"], "proxy-unreachable")
@@ -519,7 +705,7 @@ class PdaLinkWatchTest(unittest.TestCase):
             self.assertEqual(watcher.reconcile(), 1)
 
             self.assertTrue(any(is_service_call(call, "stop") for call in runner.calls))
-            self.assertIn(["/adb", "forward", "--remove", "tcp:18080"], runner.calls)
+            self.assertIn(["/adb", "-s", "R3CR406AAGE", "forward", "--remove", "tcp:18080"], runner.calls)
             self.assertTrue(any(call[-2:] == ["-a", "dev.pdalink.prototype.STOP_USB"] for call in runner.calls))
             payload = json.loads(state_file.read_text(encoding="utf-8"))
             self.assertEqual(payload["mode"], "waiting-trusted-device")
@@ -583,7 +769,7 @@ class PdaLinkWatchTest(unittest.TestCase):
             self.assertEqual(watcher.reconcile(), 1)
 
             self.assertTrue(any(is_service_call(call, "stop") for call in runner.calls))
-            self.assertIn(["/adb", "forward", "--remove", "tcp:18080"], runner.calls)
+            self.assertIn(["/adb", "-s", "R3CR406AAGE", "forward", "--remove", "tcp:18080"], runner.calls)
             self.assertTrue(any(call[-2:] == ["-a", "dev.pdalink.prototype.STOP_USB"] for call in runner.calls))
             payload = json.loads(state_file.read_text(encoding="utf-8"))
             self.assertEqual(payload["mode"], "auto-connect-off")
@@ -620,12 +806,69 @@ class PdaLinkWatchTest(unittest.TestCase):
             self.assertEqual(watcher.run_loop(), 0)
 
             self.assertTrue(any(is_service_call(call, "stop") for call in runner.calls))
-            self.assertIn(["/adb", "forward", "--remove", "tcp:18080"], runner.calls)
+            self.assertIn(["/adb", "-s", "R3CR406AAGE", "forward", "--remove", "tcp:18080"], runner.calls)
             self.assertTrue(any(call[-2:] == ["-a", "dev.pdalink.prototype.STOP_USB"] for call in runner.calls))
             payload = json.loads(state_file.read_text(encoding="utf-8"))
             self.assertEqual(payload["mode"], "stopped")
             self.assertFalse(payload["forward_owned"])
             self.assertFalse(payload["service_owned"])
+
+    def test_run_loop_detects_suspend_gap_and_revalidates_ready_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "watch.json"
+            pdalink_watch.WatchState(
+                mode="ready",
+                device_serial="R3CR406AAGE",
+                device_state="device",
+                forward_owned=True,
+                service_owned=True,
+                local_port=18080,
+                remote_port=8000,
+                proxy_url="http://127.0.0.1:18080",
+            ).save(state_file)
+            ticks = iter((0.0, 0.0, 2.0, 20.0))
+            output = io.StringIO()
+            watcher = pdalink_watch.PdaLinkWatcher(
+                self.make_config(state_file),
+                runner=FakeRunner(
+                    authorized_devices(),
+                    "R3CR406AAGE tcp:18080 tcp:8000\n",
+                    service_running=True,
+                ),
+                probe=ok_probe,
+                sleeper=lambda _delay: None,
+                boot_clock=lambda: next(ticks),
+                stdout=output,
+            )
+
+            self.assertEqual(watcher.run_loop(max_loops=2), 0)
+
+            payload = json.loads(state_file.read_text(encoding="utf-8"))
+            self.assertTrue(payload["last_resume_at"])
+            self.assertEqual(payload["mode"], "ready")
+            self.assertIn("recovering-resume", output.getvalue())
+
+    def test_repeated_ready_reconcile_does_not_rewrite_or_relog_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "watch.json"
+            output = io.StringIO()
+            runner = FakeRunner(authorized_devices())
+            watcher = pdalink_watch.PdaLinkWatcher(
+                self.make_config(state_file),
+                runner=runner,
+                probe=ok_probe,
+                stdout=output,
+            )
+
+            self.assertEqual(watcher.reconcile(), 0)
+            first_updated_at = json.loads(state_file.read_text(encoding="utf-8"))["updated_at"]
+            output.seek(0)
+            output.truncate(0)
+            self.assertEqual(watcher.reconcile(), 0)
+
+            second_updated_at = json.loads(state_file.read_text(encoding="utf-8"))["updated_at"]
+            self.assertEqual(second_updated_at, first_updated_at)
+            self.assertEqual(output.getvalue(), "")
 
     def test_when_offline_policy_does_not_start_until_implemented(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -36,6 +36,7 @@ final class HttpProxyServer implements Closeable {
     private static final int MAX_HEADER_BYTES = 64 * 1024;
     private static final int MAX_HEADER_COUNT = 100;
     private static final long MAX_CONTENT_LENGTH = 16L * 1024L * 1024L;
+    private static final int MAX_RECENT_SESSIONS = 20;
 
     interface SocketFactory {
         Socket open(TargetHost host) throws IOException;
@@ -43,6 +44,10 @@ final class HttpProxyServer implements Closeable {
 
     interface StatusSink {
         void status(String line);
+    }
+
+    interface SessionSink {
+        void sessionsChanged();
     }
 
     static final class TargetHost {
@@ -59,8 +64,11 @@ final class HttpProxyServer implements Closeable {
     private final int[] candidatePorts;
     private final String bindAddress;
     private final String allowedClientPrefix;
+    private final String transport;
     private final SocketFactory socketFactory;
     private final StatusSink statusSink;
+    private final SessionSink sessionSink;
+    private final ProxySessionStore sessionStore = new ProxySessionStore(MAX_RECENT_SESSIONS);
     private final ExecutorService executor = Executors.newCachedThreadPool();
     private final Set<Socket> activeSockets = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private final AtomicInteger activeClients = new AtomicInteger();
@@ -81,12 +89,27 @@ final class HttpProxyServer implements Closeable {
     }
 
     HttpProxyServer(Context context, String bindAddress, String allowedClientPrefix, int[] candidatePorts, SocketFactory socketFactory, StatusSink statusSink) {
+        this(context, bindAddress, allowedClientPrefix, candidatePorts, socketFactory, statusSink,
+                "127.0.0.1".equals(bindAddress) ? "USB" : "Wi-Fi", () -> { });
+    }
+
+    HttpProxyServer(
+            Context context,
+            String bindAddress,
+            String allowedClientPrefix,
+            int[] candidatePorts,
+            SocketFactory socketFactory,
+            StatusSink statusSink,
+            String transport,
+            SessionSink sessionSink) {
         this.context = context;
         this.candidatePorts = candidatePorts;
         this.bindAddress = bindAddress;
         this.allowedClientPrefix = allowedClientPrefix == null ? "" : allowedClientPrefix;
+        this.transport = transport == null ? "" : transport;
         this.socketFactory = socketFactory;
         this.statusSink = statusSink;
+        this.sessionSink = sessionSink;
     }
 
     void start() {
@@ -141,6 +164,10 @@ final class HttpProxyServer implements Closeable {
         return downstreamBytes.get();
     }
 
+    List<ProxySessionSnapshot> getSessionSnapshots() {
+        return sessionStore.snapshot();
+    }
+
     private void acceptLoop() {
         while (running) {
             try {
@@ -168,7 +195,11 @@ final class HttpProxyServer implements Closeable {
     }
 
     private void handleClient(Socket client) {
+        String address = clientAddress(client);
+        ProxySessionStore.SessionHandle session = sessionStore.begin(
+                transport, address, System.currentTimeMillis());
         activeClients.incrementAndGet();
+        boolean sessionPublished = false;
         try (Socket ignored = client) {
             client.setSoTimeout(CLIENT_SOCKET_TIMEOUT_MS);
             client.setTcpNoDelay(true);
@@ -179,13 +210,21 @@ final class HttpProxyServer implements Closeable {
                 if (request == null) {
                     return;
                 }
+                sessionStore.updateRequest(session, request.method, requestDestination(request));
+                boolean pacRequest = isPacRequest(request);
+                if (pacRequest) {
+                    sessionStore.excludeFromHistory(session);
+                } else {
+                    sessionsChanged();
+                    sessionPublished = true;
+                }
                 lastRequest = request.method + " " + request.target;
                 if ("CONNECT".equalsIgnoreCase(request.method)) {
-                    handleConnect(client, request, input, output);
+                    handleConnect(client, request, input, output, session);
                 } else if (isPacRequest(request)) {
                     writePac(output, !"HEAD".equalsIgnoreCase(request.method), request);
                 } else if (isHttpProxyTarget(request.target)) {
-                    handleHttp(request, input, output);
+                    handleHttp(request, input, output, session);
                 } else {
                     writeResponse(output, 400, "Bad Request", "Unsupported proxy request target\n");
                 }
@@ -198,6 +237,10 @@ final class HttpProxyServer implements Closeable {
         } finally {
             untrackSocket(client);
             activeClients.decrementAndGet();
+            sessionStore.finish(session, System.currentTimeMillis());
+            if (sessionPublished) {
+                sessionsChanged();
+            }
         }
     }
 
@@ -239,7 +282,12 @@ final class HttpProxyServer implements Closeable {
         return new Request(parts[0], parts[1], parts[2], headers);
     }
 
-    private void handleConnect(Socket client, Request request, InputStream clientInput, OutputStream clientOutput) throws IOException {
+    private void handleConnect(
+            Socket client,
+            Request request,
+            InputStream clientInput,
+            OutputStream clientOutput,
+            ProxySessionStore.SessionHandle session) throws IOException {
         TargetHost target;
         try {
             target = parseConnectTarget(request.target);
@@ -256,14 +304,18 @@ final class HttpProxyServer implements Closeable {
                 clientOutput.flush();
                 client.setSoTimeout(0);
                 remote.setSoTimeout(0);
-                tunnel(client, remote, clientInput, clientOutput);
+                tunnel(client, remote, clientInput, clientOutput, session);
             } finally {
                 untrackSocket(remote);
             }
         }
     }
 
-    private void handleHttp(Request request, InputStream clientInput, OutputStream clientOutput) throws IOException {
+    private void handleHttp(
+            Request request,
+            InputStream clientInput,
+            OutputStream clientOutput,
+            ProxySessionStore.SessionHandle session) throws IOException {
         String transferEncoding = headerValue(request, "transfer-encoding");
         if (transferEncoding != null && !"identity".equalsIgnoreCase(transferEncoding)) {
             writeResponse(clientOutput, 501, "Not Implemented", "Transfer-Encoding request bodies are not supported by this prototype\n");
@@ -343,13 +395,11 @@ final class HttpProxyServer implements Closeable {
                 remoteOut.write("Connection: close\r\n\r\n".getBytes(StandardCharsets.ISO_8859_1));
                 long upstream = 0L;
                 if (contentLength > 0) {
-                    upstream = copyFixed(clientInput, remoteOut, contentLength);
-                    upstreamBytes.addAndGet(upstream);
+                    upstream = copyFixed(clientInput, remoteOut, contentLength, session, true);
                 }
                 remoteOut.flush();
 
-                long downstream = copy(remote.getInputStream(), clientOutput);
-                downstreamBytes.addAndGet(downstream);
+                long downstream = copy(remote.getInputStream(), clientOutput, session, false);
                 status("HTTP traffic up " + formatBytes(upstream) + " down " + formatBytes(downstream));
             } finally {
                 untrackSocket(remote);
@@ -357,15 +407,19 @@ final class HttpProxyServer implements Closeable {
         }
     }
 
-    private void tunnel(Socket client, Socket remote, InputStream clientInput, OutputStream clientOutput) throws IOException {
+    private void tunnel(
+            Socket client,
+            Socket remote,
+            InputStream clientInput,
+            OutputStream clientOutput,
+            ProxySessionStore.SessionHandle session) throws IOException {
         CountDownLatch done = new CountDownLatch(2);
         AtomicLong upstream = new AtomicLong();
         AtomicLong downstream = new AtomicLong();
         executor.execute(() -> {
             try {
-                long copied = copy(clientInput, remote.getOutputStream());
+                long copied = copy(clientInput, remote.getOutputStream(), session, true);
                 upstream.set(copied);
-                upstreamBytes.addAndGet(copied);
             } catch (IOException ignored) {
             } finally {
                 shutdownOutput(remote);
@@ -374,9 +428,8 @@ final class HttpProxyServer implements Closeable {
         });
         executor.execute(() -> {
             try {
-                long copied = copy(remote.getInputStream(), clientOutput);
+                long copied = copy(remote.getInputStream(), clientOutput, session, false);
                 downstream.set(copied);
-                downstreamBytes.addAndGet(copied);
             } catch (IOException ignored) {
             } finally {
                 shutdownOutput(client);
@@ -401,6 +454,33 @@ final class HttpProxyServer implements Closeable {
 
     private boolean isHttpProxyTarget(String target) {
         return target != null && target.regionMatches(true, 0, "http://", 0, "http://".length());
+    }
+
+    private String requestDestination(Request request) {
+        if ("CONNECT".equalsIgnoreCase(request.method)) {
+            try {
+                TargetHost target = parseConnectTarget(request.target);
+                return hostHeader(target.host, target.port);
+            } catch (IOException ignored) {
+                return "";
+            }
+        }
+        if (isPacRequest(request)) {
+            return "PdaLink proxy setup";
+        }
+        if (!isHttpProxyTarget(request.target)) {
+            return "";
+        }
+        try {
+            URI uri = URI.create(request.target);
+            String host = uri.getHost();
+            if (host == null) {
+                return "";
+            }
+            return hostHeader(host, uri.getPort() == -1 ? 80 : uri.getPort());
+        } catch (IllegalArgumentException ignored) {
+            return "";
+        }
     }
 
     private void writePac(OutputStream output, boolean includeBody, Request request) throws IOException {
@@ -546,7 +626,11 @@ final class HttpProxyServer implements Closeable {
         return buffer.toString("ISO-8859-1");
     }
 
-    private long copy(InputStream input, OutputStream output) throws IOException {
+    private long copy(
+            InputStream input,
+            OutputStream output,
+            ProxySessionStore.SessionHandle session,
+            boolean upstream) throws IOException {
         byte[] buffer = new byte[32 * 1024];
         long total = 0L;
         int read;
@@ -554,11 +638,17 @@ final class HttpProxyServer implements Closeable {
             output.write(buffer, 0, read);
             output.flush();
             total += read;
+            recordTraffic(session, upstream, read);
         }
         return total;
     }
 
-    private long copyFixed(InputStream input, OutputStream output, long length) throws IOException {
+    private long copyFixed(
+            InputStream input,
+            OutputStream output,
+            long length,
+            ProxySessionStore.SessionHandle session,
+            boolean upstream) throws IOException {
         byte[] buffer = new byte[32 * 1024];
         long remaining = length;
         long total = 0L;
@@ -570,8 +660,20 @@ final class HttpProxyServer implements Closeable {
             output.write(buffer, 0, read);
             remaining -= read;
             total += read;
+            recordTraffic(session, upstream, read);
         }
         return total;
+    }
+
+    private void recordTraffic(
+            ProxySessionStore.SessionHandle session, boolean upstream, long byteCount) {
+        if (upstream) {
+            upstreamBytes.addAndGet(byteCount);
+            sessionStore.addTraffic(session, byteCount, 0L);
+        } else {
+            downstreamBytes.addAndGet(byteCount);
+            sessionStore.addTraffic(session, 0L, byteCount);
+        }
     }
 
     private void shutdownOutput(Socket socket) {
@@ -605,6 +707,10 @@ final class HttpProxyServer implements Closeable {
     private void status(String line) {
         Log.i(TAG, line);
         statusSink.status(line);
+    }
+
+    private void sessionsChanged() {
+        sessionSink.sessionsChanged();
     }
 
     private boolean clientAllowed(Socket client) {

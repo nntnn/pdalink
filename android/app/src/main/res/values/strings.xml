@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PdaLink</string>
+    <string name="prototype_label">PROTOTYPE</string>
+    <string name="refresh_description">Refresh connection status</string>
+
+    <string name="nav_overview">Overview</string>
+    <string name="nav_connections">Connections</string>
+    <string name="nav_diagnostics">Diagnostics</string>
+
+    <string name="status_active">Connected</string>
+    <string name="status_idle">Stopped</string>
+    <string name="status_attention">Needs attention</string>
+    <string name="status_starting">Starting</string>
+    <string name="status_not_active">Not active</string>
+    <string name="mode_initial">USB</string>
+    <string name="egress_format">Internet via %1$s</string>
+    <string name="stop_all">Stop all</string>
+    <string name="stop_all_confirm_title">Stop every connection?</string>
+    <string name="stop_all_confirm_message">USB and the active Wi-Fi transport will stop. Connected clients will lose access.</string>
+    <string name="stop_wifi">Stop Wi-Fi</string>
+    <string name="view_diagnostics">View diagnostics</string>
+    <string name="configure">Configure</string>
+
+    <string name="usb_title">USB</string>
+    <string name="usb_development">Development USB</string>
+    <string name="usb_product">Product USB</string>
+    <string name="usb_target_label">Proxy target</string>
+
+    <string name="wifi_title">Wi-Fi</string>
+    <string name="wifi_local_hotspot">Local Hotspot</string>
+    <string name="wifi_direct">Wi-Fi Direct</string>
+    <string name="wifi_off">Off</string>
+    <string name="wifi_inactive_hint">Add a local hotspot or Wi-Fi Direct connection when another client needs access.</string>
+    <string name="ssid_label">Network</string>
+    <string name="password_label">Password</string>
+    <string name="wifi_target_label">Proxy target</string>
+    <string name="wifi_metadata_format">Security: %1$s · Clients: %2$s</string>
+    <string name="value_unavailable">—</string>
+    <string name="copy">Copy</string>
+    <string name="show">Show</string>
+    <string name="hide">Hide</string>
+    <string name="password_hidden_description">Password hidden</string>
+    <string name="password_visible_description">Password visible</string>
+    <string name="copied_format">%1$s copied</string>
+    <string name="show_connection_qr">Connection QR</string>
+    <string name="connection_qr_title">Connect another device</string>
+    <string name="connection_qr_description">PdaLink connection QR code</string>
+    <string name="connection_qr_warning">This code contains the Wi-Fi password. Show it only to devices you trust.</string>
+    <string name="copy_connection_uri">Copy code</string>
+    <string name="connection_uri_label">Connection code</string>
+
+    <string name="metric_connections">View clients ›</string>
+    <string name="metric_traffic">Traffic</string>
+    <string name="metric_egress">Egress</string>
+    <string name="value_zero">0</string>
+    <string name="value_zero_bytes">0 B</string>
+
+    <string name="connections_title">Connection setup</string>
+    <string name="connections_description">Choose one USB mode and optionally add one Wi-Fi transport.</string>
+    <string name="usb_mode_title">Base USB mode</string>
+    <string name="usb_mode_description">Development USB uses the loopback proxy. Product USB uses an attached accessory and host trust.</string>
+    <string name="apply_usb_mode">Apply USB mode</string>
+    <string name="wifi_mode_title">Additional Wi-Fi</string>
+    <string name="wifi_mode_description">Local Hotspot and Wi-Fi Direct are mutually exclusive. Switching disconnects current Wi-Fi clients.</string>
+    <string name="local_hotspot_credential_policy">Local Hotspot credentials: Android-managed on Android 15 and may rotate when the reservation is recreated. Choose Wi-Fi Direct when fixed credentials are required. Custom Local Hotspot credentials require Android 16 or later.</string>
+    <string name="wifi_band_title">Wi-Fi Direct band</string>
+    <string name="wifi_band_automatic">Automatic</string>
+    <string name="wifi_band_24">2.4 GHz</string>
+    <string name="wifi_band_5">5 GHz</string>
+    <string name="wifi_band_legacy">Android 9 or earlier supports Automatic selection only.</string>
+    <string name="apply_wifi_mode">Apply Wi-Fi mode</string>
+
+    <string name="diagnostics_title">Diagnostics</string>
+    <string name="diagnostics_description">Detailed transport state and recent service events.</string>
+    <string name="snapshot_title">Status snapshot</string>
+    <string name="activity_title">Recent activity</string>
+    <string name="activity_empty">No events yet.</string>
+
+    <string name="active_clients_title">Proxy clients</string>
+    <string name="active_clients_description">Active clients have an open proxy session. Known clients also include the recent in-memory session list.</string>
+    <string name="back_to_overview">‹ Overview</string>
+    <string name="back_to_overview_description">Back to Overview</string>
+    <string name="active_sessions_section">Active sessions (%1$d)</string>
+    <string name="recent_sessions_section">Recently ended (%1$d)</string>
+    <string name="no_active_sessions">No active proxy sessions.</string>
+    <string name="no_recent_sessions">No recently ended sessions.</string>
+    <string name="session_history_privacy">Destination history stays in memory only and is cleared when the proxy transport stops.</string>
+    <string name="sessions_truncated">Only the newest sessions are shown.</string>
+    <string name="session_active">ACTIVE</string>
+    <string name="session_ended">ENDED</string>
+    <string name="session_waiting">Waiting for request</string>
+    <string name="session_usb_host">USB host</string>
+    <string name="session_unknown_client">Unknown client</string>
+    <string name="session_client_format">%1$s · %2$s</string>
+    <string name="session_active_metadata">%1$s · Started %2$s · %3$s</string>
+    <string name="session_ended_metadata">%1$s · %2$s–%3$s · %4$s</string>
+    <string name="session_traffic_format">↓ %1$s · ↑ %2$s</string>
+    <string name="client_summary_format">%1$s · %2$s</string>
+    <string name="client_summary_accessibility">%1$s. %2$s. View client details.</string>
+    <plurals name="active_client_summary">
+        <item quantity="one">%d active</item>
+        <item quantity="other">%d active</item>
+    </plurals>
+    <plurals name="known_client_summary">
+        <item quantity="one">%d known</item>
+        <item quantity="other">%d known</item>
+    </plurals>
+    <string name="client_one">client</string>
+    <string name="client_other">clients</string>
+
+    <string name="detail_mode">Mode: %1$s</string>
+    <string name="detail_usb_proxy">USB proxy: %1$s</string>
+    <string name="detail_wifi_proxy">Wi-Fi proxy: %1$s</string>
+    <string name="detail_wifi_transport">Wi-Fi transport: %1$s</string>
+    <string name="detail_wifi_ownership">Wi-Fi ownership: %1$s</string>
+    <string name="detail_wifi_clients">Wi-Fi clients: %1$s</string>
+    <string name="detail_wifi_security">Wi-Fi security: %1$s</string>
+    <string name="detail_proxy_connections">Active proxy connections: %1$d</string>
+    <string name="detail_internet_usage">Internet usage: down %1$s / up %2$s</string>
+    <string name="detail_egress">Egress: %1$s</string>
+    <string name="detail_product_usb">Product USB: %1$s</string>
+    <string name="detail_wifi_network">Wi-Fi network: %1$s</string>
+    <string name="detail_wifi_band">Wi-Fi band: %1$s</string>
+    <string name="detail_usb_target">USB target: %1$s</string>
+    <string name="detail_wifi_target">Wi-Fi target: %1$s</string>
+    <string name="detail_last_request">Last request: %1$s</string>
+    <string name="detail_last_error">Last error: %1$s</string>
+</resources>

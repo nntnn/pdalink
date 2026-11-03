@@ -47,14 +47,32 @@ If using Android Studio:
 
 ## Android App
 
-1. Open `PdaLink Prototype`.
+1. Open `PdaLink`.
 2. Grant requested Wi-Fi/nearby device/notification permissions.
-3. Select `Automatic`, `2.4 GHz`, or `5 GHz` under `Wi-Fi Direct band`.
-4. Tap `Start USB`, then `Add Wi-Fi Direct`.
-5. Wait for group information.
-6. Confirm the summary shows both the requested band and actual frequency.
-7. Confirm `P2P group ownership` reports `PdaLink`.
-8. Note the SSID and passphrase shown by the app.
+3. Open `Connections`, select `Development USB`, and tap `Apply USB mode`.
+4. Select `Wi-Fi Direct`, then choose `Automatic`, `2.4 GHz`, or `5 GHz`.
+5. Tap `Apply Wi-Fi mode` and return to `Overview`.
+6. Wait for the Wi-Fi card to show the group information.
+7. Open `Diagnostics` and confirm the requested band, actual frequency, and
+   `Wi-Fi ownership: PdaLink`.
+8. Return to `Overview`; note the SSID, reveal or copy the passphrase, and copy
+   the Wi-Fi proxy target.
+9. Send an HTTP or HTTPS request through either proxy. Confirm the Overview
+   client metric separates currently active clients from clients retained in
+   recent in-memory history, for example `1 active · 2 known`. Multiple sockets
+   from one client must not increase either client count.
+10. Tap that metric and confirm `Proxy clients` shows the transport, client
+    address (or `USB host`), destination host and port, method, start time,
+    duration, and per-session traffic. After the request ends, confirm it moves
+    to `Recently ended`.
+11. Confirm Android Back and `‹ Overview` return to Overview without adding a
+    fourth bottom-navigation destination.
+
+The session list must not display a full HTTP URL path or query. Recent
+destinations are memory-only, limited to the newest sessions, and disappear
+when the corresponding proxy transport stops. `Known` therefore means clients
+identified from those current and recent proxy sessions, not every device
+associated with the Wi-Fi network.
 
 If another app already owns a Wi-Fi Direct group, PdaLink must report that it
 does not own the group, keep the Wi-Fi Direct proxy closed, and leave the
@@ -68,9 +86,9 @@ back to another band. Android 9 and earlier expose `Automatic` only.
 Verify all modes on Android 10 or later:
 
 1. Start with `Automatic` and record the actual frequency.
-2. Select `2.4 GHz`, tap `Add Wi-Fi Direct`, and confirm an actual frequency
+2. Select `2.4 GHz`, tap `Apply Wi-Fi mode`, and confirm an actual frequency
    between 2400 and 2499 MHz.
-3. Select `5 GHz`, tap `Add Wi-Fi Direct`, and confirm an actual frequency
+3. Select `5 GHz`, tap `Apply Wi-Fi mode`, and confirm an actual frequency
    between 4900 and 5899 MHz.
 4. Confirm the SSID and passphrase are unchanged across steps 2 and 3.
 5. Confirm the USB proxy remains reachable throughout the band changes.
@@ -82,9 +100,11 @@ creates a local AP, but does not attach Android tethering or an internet
 upstream to it. PdaLink listens on that AP and each client sends HTTP/HTTPS
 traffic explicitly through the displayed proxy.
 
-1. Tap `Start USB`, then `Add Local Hotspot`.
+1. Open `Connections`, select `Development USB`, and tap `Apply USB mode`.
+   Select `Local Hotspot` and tap `Apply Wi-Fi mode`.
 2. Approve the Android or vendor hotspot dialog if it appears on first use.
-3. Read `Wi-Fi network`, `Wi-Fi security`, and `Wi-Fi target` from the app.
+3. In `Overview`, read the network, security, and proxy target from the Wi-Fi
+   card. Reveal or copy the password when joining a client.
 4. Join two clients using the current SSID and password.
 5. Configure each Wi-Fi profile as local-only: no default route, no automatic
    DNS, and no IPv6 default route.
@@ -100,12 +120,12 @@ Expected results:
 - Android reports the AP as local-only with no tethering upstream.
 - Both clients receive HTTP responses through the PdaLink proxy while keeping
   their normal default route unchanged.
-- `Wi-Fi clients` displays `not exposed`; Android's public Local-Only Hotspot
+- `Clients` displays `unavailable`; Android's public Local-Only Hotspot
   reservation API does not provide this count to the app.
 
 Stop and recreate the reservation before testing credential recovery. If the
 SSID or password changes, replace the saved client profile values with the
-current app summary. Also check `Wi-Fi security`: some phones create a
+current `Overview` card. Also check `Security`: some phones create a
 WPA2/WPA3 transition network that older WPA2-only adapters cannot join even
 when the password is correct.
 
@@ -126,13 +146,54 @@ Then test the host-side rotation guard:
 ```
 
 The pin file contains the SSID and a password hash with mode `0600`, not the
-password. NetworkManager retains the connection secret in its normal profile.
-Pinned mode cannot force Android to reuse credentials because the public
-Local-Only Hotspot API does not accept an app-selected SSID or passphrase.
+password. The NetworkManager profile marks the secret agent-owned; PdaLink
+passes it through a mode-`0600` one-use password file during activation and
+removes that file afterward.
+Pinned mode cannot force Android 15/API 35 to reuse credentials because its
+public Local-Only Hotspot API does not accept an app-selected SSID or
+passphrase. The PdaLink `Connections` page reports this policy; fixed custom
+Local Hotspot credentials require Android 16/API 36 or later.
 Verify that opening the app, refreshing status, restarting only the USB
 watcher, and repeating a Local Hotspot start while its reservation is already
 active do not change the credential fingerprint. A stop followed by a new
 explicit start is a new Android reservation and may rotate it.
+
+### Raspberry Pi Zero development target
+
+This path requires USB for initial provisioning and for recovery after a real
+Android credential rotation. Once provisioned, the same-credential cold-boot
+path must work without USB.
+
+1. On the Zero, run `sudo ./tools/setup_zero_usb_gadget.sh activate`. Confirm
+   that Linux binds `cdc_ncm` and `cdc_acm`, then configure the host with
+   `./tools/setup_zero_usb_host.sh usb0`.
+2. Confirm bidirectional ping on `10.55.0.1/24` and key-only
+   `ssh pdalink-zero`. Confirm the ACM login prompt remains available on the
+   stable by-id serial device.
+3. Only after the live link passes, run
+   `sudo ./tools/setup_zero_usb_gadget.sh persist` and reboot. Repeat the ping,
+   SSH, and serial checks.
+4. Authorize the dedicated host key on the Zero, verify key-only SSH, then
+   install `sudo ./tools/install_zero_target.sh` on the Zero. Confirm that the
+   sudoers entry permits only `/usr/local/sbin/pdalink-target-apply` with no
+   arguments, `/etc/pdalink/client.env` is mode `0600`, and password SSH is
+   disabled while the ACM serial login prompt still works.
+5. On the host, enable `local_hotspot_credentials=auto`,
+   `local_hotspot_join=if_disconnected`, and
+   `local_hotspot_target=pdalink-zero`, then restart the user watcher.
+6. Stop and explicitly recreate the Android Local Hotspot. Within the watcher
+   retry window, confirm both Linux and Zero use the new SSID, both profiles
+   connect, and HTTPS succeeds from both machines. The ordinary Linux profile
+   reports `psk-flags=1`. The Zero profile reports `autoconnect=yes`,
+   `autoconnect-retries=0`, and `psk-flags=0`; its NetworkManager keyfile is
+   root-owned mode `0600`, while the Zero target-state file contains only a
+   credential hash.
+7. Keep an unrelated Linux Wi-Fi connection active and repeat a watcher pass.
+   `if_disconnected` must not replace that connection.
+8. With the Android reservation still active and unchanged, remove the Zero USB
+   cable, power-cycle the Zero from its power port, and confirm that it rejoins
+   the Local Hotspot, starts `pdalink-client.service`, and reaches HTTPS without
+   receiving another credential payload.
 
 ## Linux Connection
 
@@ -234,23 +295,24 @@ python3 linux/pdalink_lite.py curl-test --url https://ifconfig.me
 
 The returned IP should be the phone's cellular egress IP.
 
-The Android app summary should show:
+The Android `Overview` and `Diagnostics` pages should show:
 
 - `Mode: USB + Wi-Fi Direct`.
 - `USB proxy: listening on 127.0.0.1:8000`.
-- `Wi-Fi Direct proxy: listening on 192.168.49.1:8001`.
-- `P2P group ownership: PdaLink`.
-- `P2P group clients:` with the number of devices currently joined to the
+- `Wi-Fi proxy: listening on 192.168.49.1:8001`.
+- `Wi-Fi ownership: PdaLink`.
+- `Wi-Fi clients:` with the number of devices currently joined to the
   Direct group.
 - `Active proxy connections:` reported separately from group membership.
-- `Wi-Fi Direct:` with SSID, passphrase, and P2P interface.
-- `Wi-Fi Direct band:` with the requested mode and actual MHz.
+- The `Overview` Wi-Fi card with SSID, reveal/copy password controls, and proxy
+  target. `Diagnostics` also shows the P2P interface.
+- `Wi-Fi band:` with the requested mode and actual MHz.
 - `USB target: http://127.0.0.1:8000`.
-- `Wi-Fi Direct target: http://192.168.49.1:8001`.
+- `Wi-Fi target: http://192.168.49.1:8001`.
 - `Last request:` changing when `probe` or `curl-test` runs.
 
 For the multi-client gate, join the displayed group from two separate devices,
-refresh the Android summary, and require `P2P group clients: 2`. Run an HTTPS
+refresh the Android status, and require `Wi-Fi clients: 2` in `Diagnostics`. Run an HTTPS
 proxy request from both devices at the same time, then disconnect one device and
 require the count to return to `1`. Repeated connect/disconnect churn or either
 request bypassing `192.168.49.1:8001` fails the gate.
@@ -798,7 +860,8 @@ SUBSYSTEM=="usb", ATTR{idVendor}=="18d1", ATTR{idProduct}=="2d01", MODE="0664", 
 ```
 
 After accessory attach, the Android app should show the Product USB consent
-surface. Tap `Start Product USB` or approve the accessory prompt. Then start
+surface. In `Connections`, select `Product USB` and tap `Apply USB mode`, or
+approve the accessory prompt. Then start
 the Linux Product USB bridge in a separate terminal:
 
 ```bash
@@ -907,6 +970,46 @@ Expected behavior:
   service.
 - If USB is unplugged or debugging authorization disappears, the watcher stops
   its managed system service and removes only the ADB forward it created.
+
+### Ubuntu desktop and suspend/resume recovery
+
+Do not run the real suspend portion during a remote development session that
+depends solely on this PdaLink connection. Arrange a second connection first,
+or defer that portion until the session is complete.
+
+Install and open the desktop client:
+
+```bash
+./tools/pdalink.sh client install
+./tools/pdalink.sh client status
+./tools/pdalink.sh client run
+```
+
+Confirm the client shows independent device, forward, proxy, system, hotspot,
+target-relay, and resume stages. Click `Disconnect` and confirm
+`pdalink-watch.service` remains active while owned routes and the USB forward
+are cleaned up. Click `Connect USB` and require the UI to return to `Connected`.
+
+For a real resume check, first record status, suspend Ubuntu, then resume and
+inspect both views:
+
+```bash
+./tools/pdalink.sh watch status
+journalctl --user -u pdalink-watch.service --since "10 minutes ago" --no-pager
+```
+
+Expected behavior:
+
+- The journal reports `recovering-resume` and validates the device, ADB
+  forward, Android proxy, TUN service, routes, and DNS again.
+- A healthy owned path returns to `ready` without recreating unrelated network
+  resources.
+- A stale owned forward or unhealthy owned route service is repaired.
+- Missing USB or ADB authorization is shown as a waiting state, and retry stays
+  available from the client.
+- Local-Hotspot profile sync and target SSH relay have separate health and
+  backoff. A target relay failure must not take down an otherwise healthy USB
+  path.
 
 If you are testing from WSL 2 with a Windows-owned ADB forward, keep using the
 manual relay path instead:

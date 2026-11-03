@@ -8,6 +8,9 @@
 
 - Android `ProxyService`에는 `START_WIFI_DIRECT` action과 `WIFI_DIRECT` mode가
   이미 있다.
+- 일반 `START_WIFI_DIRECT`는 이전 native peer 기록과 무관하게 저장된
+  SSID/암호로 비영구 autonomous group을 만든다. native peer 재협상은
+  `INVITE_WIFI_DIRECT_PEER`를 명시적으로 요청한 세션에서만 활성화한다.
 - Wi-Fi Direct mode는 Android가 group owner를 만들고, Linux target을
   `http://192.168.49.1:<port>`로 표시한다.
 - Android Wi-Fi Direct proxy port는 `8001`이고 P2P group-owner 주소

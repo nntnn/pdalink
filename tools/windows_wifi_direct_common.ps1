@@ -5,6 +5,133 @@ function Write-PdaLinkStep {
     Write-Host "== $Message =="
 }
 
+function ConvertFrom-PdaLinkQueryComponent {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value)
+
+    try {
+        return [Uri]::UnescapeDataString($Value.Replace("+", " "))
+    } catch {
+        throw "connection URI encoding is invalid"
+    }
+}
+
+function Assert-PdaLinkPrivateIpv4 {
+    param([Parameter(Mandatory = $true)][string]$Address)
+
+    $parsed = [Net.IPAddress]::None
+    if (-not [Net.IPAddress]::TryParse($Address, [ref]$parsed) -or
+        $parsed.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) {
+        throw "proxy endpoint must use an IPv4 address"
+    }
+    $bytes = $parsed.GetAddressBytes()
+    $private = $bytes[0] -eq 10 -or
+        ($bytes[0] -eq 172 -and $bytes[1] -ge 16 -and $bytes[1] -le 31) -or
+        ($bytes[0] -eq 192 -and $bytes[1] -eq 168)
+    if (-not $private) {
+        throw "proxy endpoint must use a private IPv4 address"
+    }
+    return $parsed.ToString()
+}
+
+function ConvertFrom-PdaLinkConnectionUri {
+    param([Parameter(Mandatory = $true)][string]$ConnectionUri)
+
+    $raw = $ConnectionUri.Trim()
+    if (-not $raw) {
+        throw "connection URI is empty"
+    }
+    try {
+        $uri = [Uri]$raw
+    } catch {
+        throw "connection URI is malformed"
+    }
+    if (-not $uri.IsAbsoluteUri -or $uri.Scheme -ne "pdalink" -or $uri.Host -ne "connect" -or
+        $uri.UserInfo -or $uri.Port -ne -1 -or $uri.AbsolutePath -notin @("", "/") -or $uri.Fragment) {
+        throw "connection URI target is invalid"
+    }
+
+    $allowed = @{
+        v = $true
+        transport = $true
+        ssid = $true
+        security = $true
+        password = $true
+        proxy = $true
+    }
+    $values = @{}
+    $query = $uri.Query.TrimStart("?")
+    if (-not $query) {
+        throw "connection URI has no parameters"
+    }
+    foreach ($entry in $query.Split("&")) {
+        $separator = $entry.IndexOf("=")
+        if ($separator -le 0) {
+            throw "connection URI parameter is malformed"
+        }
+        $key = ConvertFrom-PdaLinkQueryComponent -Value $entry.Substring(0, $separator)
+        $value = ConvertFrom-PdaLinkQueryComponent -Value $entry.Substring($separator + 1)
+        if (-not $allowed.ContainsKey($key)) {
+            throw "unknown connection URI parameter: $key"
+        }
+        if ($values.ContainsKey($key)) {
+            throw "duplicate connection URI parameter: $key"
+        }
+        $values[$key] = $value
+    }
+    foreach ($required in @("v", "transport", "ssid", "security", "password", "proxy")) {
+        if (-not $values.ContainsKey($required) -or -not [string]$values[$required]) {
+            throw "missing connection URI parameter: $required"
+        }
+    }
+    if ([string]$values.v -ne "1") {
+        throw "unsupported connection URI version"
+    }
+    $transport = ([string]$values.transport).ToLowerInvariant()
+    if ($transport -notin @("local-hotspot", "wifi-direct")) {
+        throw "unsupported Wi-Fi transport"
+    }
+    $security = ([string]$values.security).ToLowerInvariant()
+    if ($security -notin @("wpa2-psk", "wpa3-sae", "wpa2-wpa3")) {
+        throw "unsupported Wi-Fi security mode"
+    }
+    $ssid = [string]$values.ssid
+    $ssidBytes = [Text.Encoding]::UTF8.GetByteCount($ssid)
+    if ($ssidBytes -lt 1 -or $ssidBytes -gt 32 -or $ssid.Contains([char]0)) {
+        throw "SSID must be between 1 and 32 UTF-8 bytes"
+    }
+    $password = [string]$values.password
+    if ($password.Length -lt 8 -or $password.Length -gt 63) {
+        throw "Wi-Fi password must be between 8 and 63 characters"
+    }
+    foreach ($character in $password.ToCharArray()) {
+        if ([int]$character -lt 0x20 -or [int]$character -gt 0x7e) {
+            throw "Wi-Fi password must contain printable ASCII characters"
+        }
+    }
+
+    try {
+        $proxy = [Uri]([string]$values.proxy)
+    } catch {
+        throw "proxy endpoint is malformed"
+    }
+    if (-not $proxy.IsAbsoluteUri -or $proxy.Scheme -ne "http" -or $proxy.UserInfo -or
+        $proxy.Port -lt 1 -or $proxy.Port -gt 65535 -or $proxy.AbsolutePath -notin @("", "/") -or
+        $proxy.Query -or $proxy.Fragment) {
+        throw "proxy must be an HTTP endpoint on a private IPv4 address"
+    }
+    $proxyHost = Assert-PdaLinkPrivateIpv4 -Address $proxy.Host
+    return [pscustomobject]@{
+        version = 1
+        transport = $transport
+        ssid = $ssid
+        security = $security
+        password = $password
+        proxy_url = "http://${proxyHost}:$($proxy.Port)"
+        proxy_address = $proxyHost
+        proxy_port = [int]$proxy.Port
+    }
+}
+
 function Invoke-PdaLinkNetsh {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
 
@@ -17,7 +144,9 @@ function Invoke-PdaLinkNetsh {
 function Test-PdaLinkWifiCredential {
     param(
         [Parameter(Mandatory = $true)][string]$Ssid,
-        [Parameter(Mandatory = $true)][Security.SecureString]$Password
+        [Parameter(Mandatory = $true)][Security.SecureString]$Password,
+        [ValidateSet("wpa2-psk", "wpa3-sae", "wpa2-wpa3")]
+        [string]$Security = "wpa2-psk"
     )
 
     $ssidBytes = [Text.Encoding]::UTF8.GetByteCount($Ssid)
@@ -33,10 +162,12 @@ function New-PdaLinkWifiProfile {
     param(
         [Parameter(Mandatory = $true)][string]$Ssid,
         [Parameter(Mandatory = $true)][Security.SecureString]$Password,
+        [ValidateSet("wpa2-psk", "wpa3-sae", "wpa2-wpa3")]
+        [string]$Security = "wpa2-psk",
         [string]$Interface = ""
     )
 
-    Test-PdaLinkWifiCredential -Ssid $Ssid -Password $Password
+    Test-PdaLinkWifiCredential -Ssid $Ssid -Password $Password -Security $Security
     $profileName = "PdaLink-WiFi-Direct-$([Guid]::NewGuid().ToString('N'))"
     $tempPath = Join-Path ([IO.Path]::GetTempPath()) "$profileName.xml"
     $bstr = [IntPtr]::Zero
@@ -71,7 +202,8 @@ function New-PdaLinkWifiProfile {
         $writer.WriteStartElement("MSM", $namespace)
         $writer.WriteStartElement("security", $namespace)
         $writer.WriteStartElement("authEncryption", $namespace)
-        $writer.WriteElementString("authentication", $namespace, "WPA2PSK")
+        $authentication = if ($Security -eq "wpa3-sae") { "WPA3SAE" } else { "WPA2PSK" }
+        $writer.WriteElementString("authentication", $namespace, $authentication)
         $writer.WriteElementString("encryption", $namespace, "AES")
         $writer.WriteElementString("useOneX", $namespace, "false")
         $writer.WriteEndElement()
@@ -111,10 +243,12 @@ function Connect-PdaLinkWifiDirect {
     param(
         [Parameter(Mandatory = $true)][string]$Ssid,
         [Parameter(Mandatory = $true)][Security.SecureString]$Password,
+        [ValidateSet("wpa2-psk", "wpa3-sae", "wpa2-wpa3")]
+        [string]$Security = "wpa2-psk",
         [string]$Interface = ""
     )
 
-    $profileName = New-PdaLinkWifiProfile -Ssid $Ssid -Password $Password -Interface $Interface
+    $profileName = New-PdaLinkWifiProfile -Ssid $Ssid -Password $Password -Security $Security -Interface $Interface
     try {
         $arguments = @("wlan", "connect", "name=$profileName")
         if ($Interface) {
@@ -191,9 +325,8 @@ function Wait-PdaLinkWifiDirectRoute {
     while ([DateTime]::UtcNow -lt $deadline) {
         try {
             $route = Get-PdaLinkBestRoute -RemoteAddress $ProxyAddress
-            if ($route.source_address -notlike "192.168.49.*") {
-                $lastError = "selected source $($route.source_address) is outside the Wi-Fi Direct subnet"
-            } elseif ($Interface -and $route.interface_alias -ne $Interface) {
+            [void](Assert-PdaLinkPrivateIpv4 -Address $ProxyAddress)
+            if ($Interface -and $route.interface_alias -ne $Interface) {
                 $lastError = "selected interface $($route.interface_alias) is not requested interface $Interface"
             } elseif ($route.next_hop -notin @("0.0.0.0", "")) {
                 $lastError = "selected route uses unexpected next hop $($route.next_hop)"

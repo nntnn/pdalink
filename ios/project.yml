@@ -1,0 +1,75 @@
+name: PdaLinkClient
+
+options:
+  minimumXcodeGenVersion: 2.42.0
+  bundleIdPrefix: dev.pdalink.client.ios
+  deploymentTarget:
+    iOS: "17.0"
+  groupSortPosition: top
+  createIntermediateGroups: true
+
+packages:
+  PdaLinkCore:
+    path: .
+
+settings:
+  base:
+    CODE_SIGN_STYLE: Automatic
+    CURRENT_PROJECT_VERSION: 1
+    DEVELOPMENT_TEAM: ""
+    MARKETING_VERSION: 0.1.0
+    SWIFT_VERSION: 5.0
+
+targets:
+  PdaLinkClient:
+    type: application
+    platform: iOS
+    sources:
+      - path: PdaLinkClient/App
+    resources:
+      - path: PdaLinkClient/Resources/ThirdParty
+    dependencies:
+      - package: PdaLinkCore
+      - target: PdaLinkPacketTunnel
+        embed: true
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: PdaLinkClient/Resources/PdaLinkClient.entitlements
+        PRODUCT_BUNDLE_IDENTIFIER: dev.pdalink.client.ios
+        PRODUCT_NAME: PdaLink Client
+        INFOPLIST_FILE: PdaLinkClient/Resources/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: NO
+
+  PdaLinkPacketTunnel:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: PdaLinkClient/PacketTunnel
+    dependencies:
+      - package: PdaLinkCore
+      - framework: Vendor/tun2proxy.xcframework
+        embed: false
+      - sdk: NetworkExtension.framework
+      - sdk: Security.framework
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: PdaLinkClient/Resources/PacketTunnel.entitlements
+        PRODUCT_BUNDLE_IDENTIFIER: dev.pdalink.client.ios.packet-tunnel
+        PRODUCT_NAME: PdaLinkPacketTunnel
+        INFOPLIST_FILE: PdaLinkClient/Resources/PacketTunnel-Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        SKIP_INSTALL: YES
+        APPLICATION_EXTENSION_API_ONLY: YES
+
+schemes:
+  PdaLinkClient:
+    build:
+      targets:
+        PdaLinkClient: all
+        PdaLinkPacketTunnel: all
+    run:
+      config: Debug
+    archive:
+      config: Release

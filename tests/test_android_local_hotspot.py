@@ -41,11 +41,13 @@ class AndroidLocalHotspotContractTests(unittest.TestCase):
 
     def test_ui_exposes_local_hotspot_start_and_generic_wifi_stop(self):
         source = (JAVA / "MainActivity.java").read_text(encoding="utf-8")
+        layout = (ROOT / "android/app/src/main/res/layout/activity_main.xml").read_text(encoding="utf-8")
 
-        self.assertIn('startLocalHotspot.setText("Add Local Hotspot")', source)
+        self.assertIn('android:id="@+id/wifi_mode_local_hotspot"', layout)
+        self.assertIn("startLocalHotspot();", source)
         self.assertIn("ProxyActions.ACTION_START_LOCAL_HOTSPOT", source)
         self.assertIn("ProxyActions.ACTION_STOP_WIFI", source)
-        self.assertIn('wifiClients = "not exposed"', source)
+        self.assertIn("state.wifiClientSummary()", source)
 
     def test_ui_exposes_android_selected_hotspot_security(self):
         service = (JAVA / "ProxyService.java").read_text(encoding="utf-8")
@@ -54,7 +56,20 @@ class AndroidLocalHotspotContractTests(unittest.TestCase):
         self.assertIn("configuration.getSecurityType()", service)
         self.assertIn("SECURITY_TYPE_WPA3_SAE_TRANSITION", service)
         self.assertIn("ProxyActions.EXTRA_WIFI_SECURITY", service)
-        self.assertIn("Wi-Fi security:", activity)
+        self.assertIn("R.string.detail_wifi_security", activity)
+
+    def test_settings_explain_android_15_credential_rotation_limit(self):
+        layout = (ROOT / "android/app/src/main/res/layout/activity_main.xml").read_text(
+            encoding="utf-8"
+        )
+        strings = (ROOT / "android/app/src/main/res/values/strings.xml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('android:id="@+id/local_hotspot_credential_policy"', layout)
+        self.assertIn("Android-managed on Android 15", strings)
+        self.assertIn("may rotate", strings)
+        self.assertIn("Choose Wi-Fi Direct", strings)
 
     def test_ui_refreshes_current_transport_snapshot_when_opened(self):
         activity = (JAVA / "MainActivity.java").read_text(encoding="utf-8")

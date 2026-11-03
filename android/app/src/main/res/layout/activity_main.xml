@@ -1,0 +1,970 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/screen_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="64dp"
+        android:background="@color/app_background"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="@dimen/space_16"
+        android:paddingEnd="@dimen/space_8">
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:fontFamily="sans-serif"
+                android:text="@string/app_name"
+                android:textColor="@color/text_primary"
+                android:textSize="22sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:fontFamily="sans-serif"
+                android:letterSpacing="0.12"
+                android:text="@string/prototype_label"
+                android:textColor="@color/text_secondary"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+
+        <ImageButton
+            android:id="@+id/refresh_button"
+            android:layout_width="@dimen/touch_target"
+            android:layout_height="@dimen/touch_target"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/refresh_description"
+            android:padding="12dp"
+            android:src="@drawable/ic_refresh" />
+    </LinearLayout>
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="@color/outline" />
+
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <ScrollView
+            android:id="@+id/page_overview"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:clipToPadding="false"
+            android:fillViewport="true">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="@dimen/space_16">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/bg_card"
+                    android:elevation="2dp"
+                    android:orientation="vertical"
+                    android:padding="@dimen/space_16">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
+
+                        <TextView
+                            android:id="@+id/overview_status_pill"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:background="@drawable/bg_status_idle"
+                            android:text="@string/status_idle"
+                            android:textColor="@color/idle"
+                            android:textSize="13sp"
+                            android:textStyle="bold" />
+
+                        <Space
+                            android:layout_width="0dp"
+                            android:layout_height="1dp"
+                            android:layout_weight="1" />
+
+                        <Button
+                            android:id="@+id/stop_all_button"
+                            android:layout_width="wrap_content"
+                            android:layout_height="@dimen/touch_target"
+                            android:background="@drawable/bg_button_danger"
+                            android:minWidth="96dp"
+                            android:paddingStart="@dimen/space_12"
+                            android:paddingEnd="@dimen/space_12"
+                            android:text="@string/stop_all"
+                            android:textAllCaps="false"
+                            android:textColor="@color/error"
+                            android:textStyle="bold" />
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/overview_mode_title"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="@dimen/space_12"
+                        android:text="@string/mode_initial"
+                        android:textColor="@color/text_primary"
+                        android:textSize="22sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/overview_egress"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="@dimen/space_4"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="14sp" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/error_banner"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="@dimen/space_12"
+                    android:background="@drawable/bg_error_banner"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:padding="@dimen/space_12"
+                    android:visibility="gone">
+
+                    <TextView
+                        android:id="@+id/error_banner_text"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:textColor="@color/error"
+                        android:textSize="14sp"
+                        android:textStyle="bold" />
+
+                    <Button
+                        android:id="@+id/error_diagnostics_button"
+                        android:layout_width="wrap_content"
+                        android:layout_height="@dimen/touch_target"
+                        android:background="@drawable/bg_button_danger"
+                        android:paddingStart="@dimen/space_8"
+                        android:paddingEnd="@dimen/space_8"
+                        android:text="@string/view_diagnostics"
+                        android:textAllCaps="false"
+                        android:textColor="@color/error" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="@dimen/space_12"
+                    android:background="@drawable/bg_card"
+                    android:elevation="1dp"
+                    android:orientation="vertical"
+                    android:padding="@dimen/space_16">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
+
+                        <TextView
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="@string/usb_title"
+                            android:textColor="@color/text_primary"
+                            android:textSize="18sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/usb_status"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/status_not_active"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="13sp"
+                            android:textStyle="bold" />
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/usb_mode"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="@dimen/space_4"
+                        android:text="@string/usb_development"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="14sp" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="@dimen/space_12"
+                        android:text="@string/usb_target_label"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="12sp" />
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="@dimen/space_4"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
+
+                        <TextView
+                            android:id="@+id/usb_target"
+                            android:layout_width="0dp"
+                            android:layout_height="@dimen/touch_target"
+                            android:layout_weight="1"
+                            android:background="@drawable/bg_code_value"
+                            android:fontFamily="sans-serif-monospace"
+                            android:gravity="center_vertical"
+                            android:paddingStart="@dimen/space_12"
+                            android:paddingEnd="@dimen/space_12"
+                            android:textColor="@color/text_primary"
+                            android:textIsSelectable="true"
+                            android:textSize="13sp" />
+
+                        <Button
+                            android:id="@+id/copy_usb_target_button"
+                            android:layout_width="wrap_content"
+                            android:layout_height="@dimen/touch_target"
+                            android:layout_marginStart="@dimen/space_8"
+                            android:background="@drawable/bg_button_secondary"
+                            android:minWidth="72dp"
+                            android:text="@string/copy"
+                            android:textAllCaps="false"
+                            android:textColor="@color/text_primary" />
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/product_usb_status"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="@dimen/space_8"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="13sp"
+                        android:visibility="gone" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="@dimen/space_12"
+                    android:background="@drawable/bg_card"
+                    android:elevation="1dp"
+                    android:orientation="vertical"
+                    android:padding="@dimen/space_16">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
+
+                        <TextView
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="@string/wifi_title"
+                            android:textColor="@color/text_primary"
+                            android:textSize="18sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/wifi_status"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/status_not_active"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="13sp"
+                            android:textStyle="bold" />
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/wifi_inactive_hint"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="@dimen/space_8"
+                        android:text="@string/wifi_inactive_hint"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="14sp" />
+
+                    <LinearLayout
+                        android:id="@+id/wifi_details"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:visibility="gone">
+
+                        <TextView
+                            android:id="@+id/wifi_transport"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="@dimen/space_4"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="14sp" />
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="@dimen/space_12"
+                            android:text="@string/ssid_label"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="12sp" />
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="@dimen/space_4"
+                            android:gravity="center_vertical"
+                            android:orientation="horizontal">
+
+                            <TextView
+                                android:id="@+id/wifi_ssid"
+                                android:layout_width="0dp"
+                                android:layout_height="@dimen/touch_target"
+                                android:layout_weight="1"
+                                android:background="@drawable/bg_code_value"
+                                android:fontFamily="sans-serif-monospace"
+                                android:gravity="center_vertical"
+                                android:paddingStart="@dimen/space_12"
+                                android:paddingEnd="@dimen/space_12"
+                                android:textColor="@color/text_primary"
+                                android:textIsSelectable="true"
+                                android:textSize="13sp" />
+
+                            <Button
+                                android:id="@+id/copy_wifi_ssid_button"
+                                android:layout_width="wrap_content"
+                                android:layout_height="@dimen/touch_target"
+                                android:layout_marginStart="@dimen/space_8"
+                                android:background="@drawable/bg_button_secondary"
+                                android:minWidth="72dp"
+                                android:text="@string/copy"
+                                android:textAllCaps="false"
+                                android:textColor="@color/text_primary" />
+                        </LinearLayout>
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="@dimen/space_12"
+                            android:text="@string/password_label"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="12sp" />
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="@dimen/space_4"
+                            android:gravity="center_vertical"
+                            android:orientation="horizontal">
+
+                            <TextView
+                                android:id="@+id/wifi_password"
+                                android:layout_width="0dp"
+                                android:layout_height="@dimen/touch_target"
+                                android:layout_weight="1"
+                                android:background="@drawable/bg_code_value"
+                                android:fontFamily="sans-serif-monospace"
+                                android:gravity="center_vertical"
+                                android:paddingStart="@dimen/space_12"
+                                android:paddingEnd="@dimen/space_12"
+                                android:textColor="@color/text_primary"
+                                android:textSize="13sp" />
+
+                            <Button
+                                android:id="@+id/reveal_wifi_password_button"
+                                android:layout_width="wrap_content"
+                                android:layout_height="@dimen/touch_target"
+                                android:layout_marginStart="@dimen/space_8"
+                                android:background="@drawable/bg_button_secondary"
+                                android:minWidth="64dp"
+                                android:text="@string/show"
+                                android:textAllCaps="false"
+                                android:textColor="@color/text_primary" />
+
+                            <Button
+                                android:id="@+id/copy_wifi_password_button"
+                                android:layout_width="wrap_content"
+                                android:layout_height="@dimen/touch_target"
+                                android:layout_marginStart="@dimen/space_4"
+                                android:background="@drawable/bg_button_secondary"
+                                android:minWidth="64dp"
+                                android:text="@string/copy"
+                                android:textAllCaps="false"
+                                android:textColor="@color/text_primary" />
+                        </LinearLayout>
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="@dimen/space_12"
+                            android:text="@string/wifi_target_label"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="12sp" />
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="@dimen/space_4"
+                            android:gravity="center_vertical"
+                            android:orientation="horizontal">
+
+                            <TextView
+                                android:id="@+id/wifi_target"
+                                android:layout_width="0dp"
+                                android:layout_height="@dimen/touch_target"
+                                android:layout_weight="1"
+                                android:background="@drawable/bg_code_value"
+                                android:fontFamily="sans-serif-monospace"
+                                android:gravity="center_vertical"
+                                android:paddingStart="@dimen/space_12"
+                                android:paddingEnd="@dimen/space_12"
+                                android:textColor="@color/text_primary"
+                                android:textIsSelectable="true"
+                                android:textSize="13sp" />
+
+                            <Button
+                                android:id="@+id/copy_wifi_target_button"
+                                android:layout_width="wrap_content"
+                                android:layout_height="@dimen/touch_target"
+                                android:layout_marginStart="@dimen/space_8"
+                                android:background="@drawable/bg_button_secondary"
+                                android:minWidth="72dp"
+                                android:text="@string/copy"
+                                android:textAllCaps="false"
+                                android:textColor="@color/text_primary" />
+                        </LinearLayout>
+
+                        <TextView
+                            android:id="@+id/wifi_metadata"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="@dimen/space_8"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="13sp" />
+
+                        <Button
+                            android:id="@+id/show_connection_qr_button"
+                            android:layout_width="match_parent"
+                            android:layout_height="@dimen/touch_target"
+                            android:layout_marginTop="@dimen/space_12"
+                            android:background="@drawable/bg_button_primary"
+                            android:text="@string/show_connection_qr"
+                            android:textAllCaps="false"
+                            android:textColor="@color/on_primary"
+                            android:textStyle="bold" />
+                    </LinearLayout>
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="@dimen/space_12"
+                        android:gravity="end"
+                        android:orientation="horizontal">
+
+                        <Button
+                            android:id="@+id/configure_wifi_button"
+                            style="?android:attr/buttonBarButtonStyle"
+                            android:layout_width="wrap_content"
+                            android:layout_height="@dimen/touch_target"
+                            android:background="@drawable/bg_button_secondary"
+                            android:minWidth="96dp"
+                            android:text="@string/configure"
+                            android:textAllCaps="false"
+                            android:textColor="@color/text_primary" />
+
+                        <Button
+                            android:id="@+id/stop_wifi_button"
+                            style="?android:attr/buttonBarButtonStyle"
+                            android:layout_width="wrap_content"
+                            android:layout_height="@dimen/touch_target"
+                            android:layout_marginStart="@dimen/space_8"
+                            android:background="@drawable/bg_button_danger"
+                            android:minWidth="96dp"
+                            android:text="@string/stop_wifi"
+                            android:textAllCaps="false"
+                            android:textColor="@color/error"
+                            android:visibility="gone" />
+                    </LinearLayout>
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="@dimen/space_12"
+                    android:background="@drawable/bg_card"
+                    android:baselineAligned="false"
+                    android:orientation="horizontal"
+                    android:padding="@dimen/space_12">
+
+                    <LinearLayout
+                        android:id="@+id/metric_clients_button"
+                        android:layout_width="0dp"
+                        android:layout_height="@dimen/touch_target"
+                        android:layout_weight="1"
+                        android:background="?android:attr/selectableItemBackgroundBorderless"
+                        android:clickable="true"
+                        android:focusable="true"
+                        android:gravity="center"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:id="@+id/metric_connections_value"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:gravity="center"
+                            android:maxLines="2"
+                            android:text="@string/value_zero"
+                            android:textColor="@color/text_primary"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/metric_connections"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="11sp" />
+                    </LinearLayout>
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:gravity="center"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:id="@+id/metric_traffic_value"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/value_zero_bytes"
+                            android:textColor="@color/text_primary"
+                            android:textSize="17sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/metric_traffic"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="11sp" />
+                    </LinearLayout>
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:gravity="center"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:id="@+id/metric_egress_value"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:ellipsize="end"
+                            android:maxLines="1"
+                            android:text="@string/value_unavailable"
+                            android:textColor="@color/text_primary"
+                            android:textSize="17sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/metric_egress"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="11sp" />
+                    </LinearLayout>
+                </LinearLayout>
+
+                <Space
+                    android:layout_width="1dp"
+                    android:layout_height="@dimen/space_16" />
+            </LinearLayout>
+        </ScrollView>
+
+        <ScrollView
+            android:id="@+id/page_connections"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:clipToPadding="false"
+            android:fillViewport="true"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="@dimen/space_16">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/connections_title"
+                    android:textColor="@color/text_primary"
+                    android:textSize="24sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="@dimen/space_4"
+                    android:text="@string/connections_description"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="14sp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="@dimen/space_16"
+                    android:background="@drawable/bg_card"
+                    android:orientation="vertical"
+                    android:padding="@dimen/space_16">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/usb_mode_title"
+                        android:textColor="@color/text_primary"
+                        android:textSize="18sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="@dimen/space_4"
+                        android:text="@string/usb_mode_description"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="13sp" />
+
+                    <RadioGroup
+                        android:id="@+id/usb_mode_group"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="@dimen/space_12"
+                        android:orientation="vertical">
+
+                        <RadioButton
+                            android:id="@+id/usb_mode_development"
+                            android:layout_width="match_parent"
+                            android:layout_height="@dimen/touch_target"
+                            android:checked="true"
+                            android:text="@string/usb_development"
+                            android:textColor="@color/text_primary" />
+
+                        <RadioButton
+                            android:id="@+id/usb_mode_product"
+                            android:layout_width="match_parent"
+                            android:layout_height="@dimen/touch_target"
+                            android:text="@string/usb_product"
+                            android:textColor="@color/text_primary" />
+                    </RadioGroup>
+
+                    <Button
+                        android:id="@+id/apply_usb_mode_button"
+                        android:layout_width="match_parent"
+                        android:layout_height="@dimen/touch_target"
+                        android:layout_marginTop="@dimen/space_12"
+                        android:background="@drawable/bg_button_primary"
+                        android:text="@string/apply_usb_mode"
+                        android:textAllCaps="false"
+                        android:textColor="@color/on_primary"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="@dimen/space_12"
+                    android:background="@drawable/bg_card"
+                    android:orientation="vertical"
+                    android:padding="@dimen/space_16">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/wifi_mode_title"
+                        android:textColor="@color/text_primary"
+                        android:textSize="18sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="@dimen/space_4"
+                        android:text="@string/wifi_mode_description"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="13sp" />
+
+                    <TextView
+                        android:id="@+id/local_hotspot_credential_policy"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="@dimen/space_8"
+                        android:text="@string/local_hotspot_credential_policy"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="12sp" />
+
+                    <RadioGroup
+                        android:id="@+id/wifi_mode_group"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="@dimen/space_12"
+                        android:orientation="vertical">
+
+                        <RadioButton
+                            android:id="@+id/wifi_mode_off"
+                            android:layout_width="match_parent"
+                            android:layout_height="@dimen/touch_target"
+                            android:checked="true"
+                            android:text="@string/wifi_off"
+                            android:textColor="@color/text_primary" />
+
+                        <RadioButton
+                            android:id="@+id/wifi_mode_local_hotspot"
+                            android:layout_width="match_parent"
+                            android:layout_height="@dimen/touch_target"
+                            android:text="@string/wifi_local_hotspot"
+                            android:textColor="@color/text_primary" />
+
+                        <RadioButton
+                            android:id="@+id/wifi_mode_direct"
+                            android:layout_width="match_parent"
+                            android:layout_height="@dimen/touch_target"
+                            android:text="@string/wifi_direct"
+                            android:textColor="@color/text_primary" />
+                    </RadioGroup>
+
+                    <LinearLayout
+                        android:id="@+id/wifi_band_container"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="@dimen/space_12"
+                        android:orientation="vertical"
+                        android:visibility="gone">
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="@string/wifi_band_title"
+                            android:textColor="@color/text_primary"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+
+                        <RadioGroup
+                            android:id="@+id/wifi_band_group"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical">
+
+                            <RadioButton
+                                android:id="@+id/wifi_band_automatic"
+                                android:layout_width="match_parent"
+                                android:layout_height="@dimen/touch_target"
+                                android:text="@string/wifi_band_automatic"
+                                android:textColor="@color/text_primary" />
+
+                            <RadioButton
+                                android:id="@+id/wifi_band_24"
+                                android:layout_width="match_parent"
+                                android:layout_height="@dimen/touch_target"
+                                android:text="@string/wifi_band_24"
+                                android:textColor="@color/text_primary" />
+
+                            <RadioButton
+                                android:id="@+id/wifi_band_5"
+                                android:layout_width="match_parent"
+                                android:layout_height="@dimen/touch_target"
+                                android:text="@string/wifi_band_5"
+                                android:textColor="@color/text_primary" />
+                        </RadioGroup>
+
+                        <TextView
+                            android:id="@+id/wifi_band_legacy_hint"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="@string/wifi_band_legacy"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="12sp"
+                            android:visibility="gone" />
+                    </LinearLayout>
+
+                    <Button
+                        android:id="@+id/apply_wifi_mode_button"
+                        android:layout_width="match_parent"
+                        android:layout_height="@dimen/touch_target"
+                        android:layout_marginTop="@dimen/space_12"
+                        android:background="@drawable/bg_button_primary"
+                        android:text="@string/apply_wifi_mode"
+                        android:textAllCaps="false"
+                        android:textColor="@color/on_primary"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <Space
+                    android:layout_width="1dp"
+                    android:layout_height="@dimen/space_16" />
+            </LinearLayout>
+        </ScrollView>
+
+        <include layout="@layout/page_active_clients" />
+
+        <LinearLayout
+            android:id="@+id/page_diagnostics"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:padding="@dimen/space_16"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/diagnostics_title"
+                android:textColor="@color/text_primary"
+                android:textSize="24sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/space_4"
+                android:text="@string/diagnostics_description"
+                android:textColor="@color/text_secondary"
+                android:textSize="14sp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/space_16"
+                android:text="@string/snapshot_title"
+                android:textColor="@color/text_primary"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/diagnostic_summary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/space_8"
+                android:background="@drawable/bg_code_value"
+                android:fontFamily="sans-serif-monospace"
+                android:maxLines="8"
+                android:padding="@dimen/space_12"
+                android:scrollbars="vertical"
+                android:textColor="@color/text_primary"
+                android:textIsSelectable="true"
+                android:textSize="12sp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/space_16"
+                android:text="@string/activity_title"
+                android:textColor="@color/text_primary"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <ScrollView
+                android:id="@+id/log_scroller"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_marginTop="@dimen/space_8"
+                android:layout_weight="1"
+                android:background="@drawable/bg_card"
+                android:clipToPadding="false"
+                android:fillViewport="true"
+                android:padding="@dimen/space_12">
+
+                <TextView
+                    android:id="@+id/log_view"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="sans-serif-monospace"
+                    android:text="@string/activity_empty"
+                    android:textColor="@color/text_secondary"
+                    android:textIsSelectable="true"
+                    android:textSize="12sp" />
+            </ScrollView>
+        </LinearLayout>
+    </FrameLayout>
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="@color/outline" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="64dp"
+        android:background="@color/surface"
+        android:gravity="center"
+        android:orientation="horizontal"
+        android:paddingStart="@dimen/space_8"
+        android:paddingTop="@dimen/space_8"
+        android:paddingEnd="@dimen/space_8"
+        android:paddingBottom="@dimen/space_8">
+
+        <TextView
+            android:id="@+id/nav_overview"
+            android:layout_width="0dp"
+            android:layout_height="@dimen/touch_target"
+            android:layout_weight="1"
+            android:background="@drawable/bg_nav_item"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center"
+            android:text="@string/nav_overview"
+            android:textColor="@color/nav_text"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/nav_connections"
+            android:layout_width="0dp"
+            android:layout_height="@dimen/touch_target"
+            android:layout_marginStart="@dimen/space_4"
+            android:layout_weight="1"
+            android:background="@drawable/bg_nav_item"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center"
+            android:text="@string/nav_connections"
+            android:textColor="@color/nav_text"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/nav_diagnostics"
+            android:layout_width="0dp"
+            android:layout_height="@dimen/touch_target"
+            android:layout_marginStart="@dimen/space_4"
+            android:layout_weight="1"
+            android:background="@drawable/bg_nav_item"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center"
+            android:text="@string/nav_diagnostics"
+            android:textColor="@color/nav_text"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+</LinearLayout>

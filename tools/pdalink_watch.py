@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import signal
 import shutil
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +33,11 @@ ANDROID_ACTION_STOP_USB = "dev.pdalink.prototype.STOP_USB"
 
 sys.path.insert(0, str(ROOT / "linux"))
 import pdalink_lite  # noqa: E402
+
+try:
+    import pdalink_dbus  # noqa: E402
+except ImportError:
+    pdalink_dbus = None
 
 
 @dataclass(frozen=True)
@@ -68,6 +75,13 @@ class WatchState:
     remote_port: int = DEFAULT_REMOTE_PORT
     proxy_url: str = ""
     last_error: str = ""
+    last_error_code: str = ""
+    last_transition_at: str = ""
+    last_success_at: str = ""
+    last_resume_at: str = ""
+    hotspot_credential_fingerprint: str = ""
+    hotspot_relay_fingerprint: str = ""
+    health: dict[str, str] = field(default_factory=dict)
     updated_at: str = ""
 
     @classmethod
@@ -86,6 +100,16 @@ class WatchState:
             remote_port=int(payload.get("remote_port") or DEFAULT_REMOTE_PORT),
             proxy_url=str(payload.get("proxy_url") or ""),
             last_error=str(payload.get("last_error") or ""),
+            last_error_code=str(payload.get("last_error_code") or ""),
+            last_transition_at=str(payload.get("last_transition_at") or payload.get("updated_at") or ""),
+            last_success_at=str(payload.get("last_success_at") or ""),
+            last_resume_at=str(payload.get("last_resume_at") or ""),
+            hotspot_credential_fingerprint=str(payload.get("hotspot_credential_fingerprint") or ""),
+            hotspot_relay_fingerprint=str(payload.get("hotspot_relay_fingerprint") or ""),
+            health={
+                str(key): str(value)
+                for key, value in (payload.get("health") or {}).items()
+            } if isinstance(payload.get("health"), dict) else {},
             updated_at=str(payload.get("updated_at") or ""),
         )
 
@@ -118,6 +142,7 @@ class WatchConfig:
     trusted_devices_file: Path | None = None
     config_file: Path | None = None
     product_usb_state_file: Path | None = None
+    enable_dbus: bool = True
 
     @property
     def effective_proxy_url(self) -> str:
@@ -137,6 +162,36 @@ class ForwardCheck:
 class ProxyCheck:
     ok: bool
     detail: str
+
+
+@dataclass(frozen=True)
+class ServiceCheck:
+    running: bool
+    healthy: bool
+    detail: str
+
+
+def boottime() -> float:
+    clock = getattr(time, "CLOCK_BOOTTIME", None)
+    if clock is None:
+        return time.monotonic()
+    return time.clock_gettime(clock)
+
+
+def safe_detail(raw: str, fallback: str = "") -> str:
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    detail = lines[-1] if lines else fallback
+    return detail[:500]
+
+
+def parse_credential_fingerprint(raw: str) -> str:
+    prefix = "credential-fingerprint: "
+    for line in raw.splitlines():
+        if line.startswith(prefix):
+            value = line[len(prefix):].strip()
+            if len(value) == 64 and all(char in "0123456789abcdef" for char in value):
+                return value
+    return ""
 
 
 def default_adb_path() -> str:
@@ -180,18 +235,27 @@ class PdaLinkWatcher:
         runner: SubprocessRunner | None = None,
         probe: Callable[[str, float], ProxyCheck] = probe_proxy,
         sleeper: Callable[[float], None] = time.sleep,
+        boot_clock: Callable[[], float] = boottime,
         stdout = sys.stdout,
     ) -> None:
         self.config = config
         self.runner = runner or SubprocessRunner()
         self.probe = probe
         self.sleeper = sleeper
+        self.boot_clock = boot_clock
         self.stdout = stdout
         self.state = WatchState.load(config.state_file)
         self.local_hotspot_sync_after = 0.0
+        self.local_hotspot_sync_failures = 0
+        self.target_relay_after = 0.0
+        self.target_relay_failures = 0
+        self.force_hotspot_start = False
+        self.action_queue: queue.SimpleQueue[str] = queue.SimpleQueue()
+        self.wake_event = threading.Event()
+        self.dbus_server = None
 
     def log(self, message: str) -> None:
-        print(message, file=self.stdout)
+        print(message, file=self.stdout, flush=True)
 
     def adb_command(self, args: Iterable[str], serial: str = "") -> list[str]:
         command = [self.config.adb]
@@ -209,7 +273,34 @@ class PdaLinkWatcher:
             return CommandResult(0, "", "")
         return self.runner.run(command, timeout)
 
-    def save_state(self, mode: str, device: pdalink_lite.AdbDevice | None = None, error: str = "") -> None:
+    def state_signature(self) -> tuple[object, ...]:
+        return (
+            self.state.mode,
+            self.state.device_serial,
+            self.state.device_state,
+            self.state.forward_owned,
+            self.state.service_owned,
+            self.state.local_port,
+            self.state.remote_port,
+            self.state.proxy_url,
+            self.state.last_error,
+            self.state.last_error_code,
+            self.state.hotspot_credential_fingerprint,
+            self.state.hotspot_relay_fingerprint,
+            tuple(sorted(self.state.health.items())),
+        )
+
+    def save_state(
+        self,
+        mode: str,
+        device: pdalink_lite.AdbDevice | None = None,
+        error: str = "",
+        error_code: str = "",
+        health: dict[str, str] | None = None,
+        force: bool = False,
+    ) -> bool:
+        before = self.state_signature()
+        previous_mode = self.state.mode
         self.state.mode = mode
         self.state.device_serial = device.serial if device else ""
         self.state.device_state = device.state if device else ""
@@ -217,7 +308,77 @@ class PdaLinkWatcher:
         self.state.remote_port = self.config.remote_port
         self.state.proxy_url = self.config.effective_proxy_url
         self.state.last_error = error
+        self.state.last_error_code = error_code
+        if health is not None:
+            self.state.health = dict(health)
+        changed = before != self.state_signature()
+        if not changed and not force:
+            return False
+        now = datetime.now(timezone.utc).isoformat()
+        self.state.last_transition_at = now
+        if mode == "ready" and previous_mode != "ready":
+            self.state.last_success_at = now
         self.state.save(self.config.state_file)
+        if self.dbus_server is not None:
+            self.dbus_server.emit_state_changed(self.state.__dict__)
+        return True
+
+    def enqueue_action(self, action: str) -> None:
+        self.action_queue.put(action)
+        self.wake_event.set()
+
+    def update_user_config(self, **values: str) -> tuple[bool, str]:
+        path = self.config.config_file or pdalink_lite.default_config_path()
+        try:
+            config = pdalink_lite.load_user_config(path)
+            config.update(values)
+            pdalink_lite.write_user_config(path, config)
+        except (OSError, ValueError) as exc:
+            return False, str(exc)
+        return True, ""
+
+    def process_actions(self) -> tuple[bool, str]:
+        while True:
+            try:
+                action = self.action_queue.get_nowait()
+            except queue.Empty:
+                return True, ""
+            if action == "retry":
+                continue
+            if action == "resume":
+                self.handle_resume()
+                continue
+            if action == "disconnect":
+                ok, error = self.update_user_config(auto_connect="off")
+            elif action == "connect-usb":
+                ok, error = self.update_user_config(auto_connect="on_trusted_connect")
+            elif action == "connect-hotspot":
+                ok, error = self.update_user_config(
+                    auto_connect="on_trusted_connect",
+                    local_hotspot_credentials="auto",
+                    local_hotspot_join="if_disconnected",
+                )
+                if ok:
+                    self.force_hotspot_start = True
+            else:
+                ok, error = False, f"unknown control action: {action}"
+            if not ok:
+                return False, error
+
+    def handle_resume(self) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        self.state.last_resume_at = now
+        self.local_hotspot_sync_after = 0.0
+        self.local_hotspot_sync_failures = 0
+        self.target_relay_after = 0.0
+        self.target_relay_failures = 0
+        if self.save_state(
+            "recovering-resume",
+            self.previous_device(),
+            health={"resume": "checking"},
+            force=True,
+        ):
+            self.log("recovering-resume: validating transport, proxy, route, and DNS")
 
     def previous_device(self) -> pdalink_lite.AdbDevice | None:
         if not self.state.device_serial:
@@ -367,43 +528,143 @@ class PdaLinkWatcher:
                 args.extend(["--require-product-usb", "--product-usb-state-file", str(state_path)])
         return args
 
-    def service_running(self) -> bool:
+    def service_check(self) -> ServiceCheck:
         result = self.run_read(self.service_args("status"), timeout=10.0)
-        return "wrapper: RUNNING" in result.stdout
+        running = "wrapper: RUNNING" in result.stdout
+        healthy = running and result.returncode == 0
+        detail = safe_detail(result.stderr or result.stdout, "system service status unavailable")
+        return ServiceCheck(running, healthy, detail)
+
+    def service_running(self) -> bool:
+        return self.service_check().running
 
     def start_service(self) -> tuple[bool, str]:
         if self.config.no_system_service:
             return True, ""
-        if self.service_running():
+        check = self.service_check()
+        if check.healthy:
             self.state.service_owned = bool(self.state.service_owned)
             return True, ""
+        if check.running:
+            if not self.state.service_owned:
+                return False, "system service is running but unhealthy and is not owned by this watcher"
+            result = self.run_write(self.service_args("stop"), timeout=30.0)
+            if result.returncode != 0:
+                return False, safe_detail(
+                    result.stderr or result.stdout,
+                    "unhealthy system service could not be stopped safely",
+                )
+            self.state.service_owned = False
         result = self.run_write(self.service_args("start"), timeout=30.0)
         if result.returncode != 0:
             return False, (result.stderr or result.stdout).strip() or "system service start failed"
         self.state.service_owned = not self.config.dry_run
         return True, ""
 
+    def hotspot_backoff(self, failures: int) -> float:
+        return (5.0, 15.0, 60.0, 300.0)[min(max(failures - 1, 0), 3)]
+
     def sync_local_hotspot_credentials(
             self,
             device: pdalink_lite.AdbDevice,
-            user_config: dict[str, str]) -> None:
+            user_config: dict[str, str]) -> dict[str, str]:
+        health = {
+            "hotspot": self.state.health.get("hotspot", "off"),
+            "hotspot_target": self.state.health.get("hotspot_target", "off"),
+        }
         mode = user_config.get("local_hotspot_credentials", "off")
-        if mode == "off" or time.monotonic() < self.local_hotspot_sync_after:
-            return
+        if mode == "off":
+            return {"hotspot": "off", "hotspot_target": "off"}
+        if time.monotonic() < self.local_hotspot_sync_after:
+            return health
         command = [
             sys.executable,
             str(self.config.root / "linux" / "pdalink_lite.py"),
             "local-hotspot-sync",
             "--mode", mode,
-            "--if-active",
             "--serial", device.serial,
-            "--wait", "0",
+            "--wait", "15" if self.force_hotspot_start else "0",
         ]
-        result = self.run_write(command, timeout=15.0)
+        if self.force_hotspot_start:
+            command.append("--start-android")
+        else:
+            command.append("--if-active")
+        join_policy = user_config.get("local_hotspot_join", "off")
+        if self.force_hotspot_start or self.should_join_local_hotspot(join_policy):
+            command.append("--connect")
+        result = self.run_write(command, timeout=60.0)
         inactive = result.returncode == 0 and "inactive" in result.stdout
-        self.local_hotspot_sync_after = time.monotonic() + (5.0 if inactive or result.returncode != 0 else 30.0)
+        self.force_hotspot_start = False
         if result.returncode != 0:
-            self.log(f"local-hotspot-sync: failed (exit {result.returncode}); USB remains active")
+            self.local_hotspot_sync_failures += 1
+            delay = self.hotspot_backoff(self.local_hotspot_sync_failures)
+            self.local_hotspot_sync_after = time.monotonic() + delay
+            detail = safe_detail(result.stderr or result.stdout, f"exit {result.returncode}")
+            health["hotspot"] = f"error: {detail}"
+            self.log(f"local-hotspot-sync: {detail}; retry in {int(delay)}s; USB remains active")
+            return health
+
+        self.local_hotspot_sync_failures = 0
+        self.local_hotspot_sync_after = time.monotonic() + (30.0 if not inactive else 15.0)
+        if inactive:
+            health["hotspot"] = "inactive"
+            return health
+
+        fingerprint = parse_credential_fingerprint(result.stdout)
+        if fingerprint:
+            self.state.hotspot_credential_fingerprint = fingerprint
+        health["hotspot"] = "ready"
+        target = user_config.get("local_hotspot_target", "off")
+        if target == "off":
+            return health
+        if fingerprint and fingerprint == self.state.hotspot_relay_fingerprint:
+            health["hotspot_target"] = "ready"
+            return health
+        if time.monotonic() < self.target_relay_after:
+            health["hotspot_target"] = "waiting-retry"
+            return health
+
+        relay_command = [
+            sys.executable,
+            str(self.config.root / "linux" / "pdalink_lite.py"),
+            "local-hotspot-target-sync",
+            "--serial", device.serial,
+            "--target", target,
+        ]
+        relay = self.run_write(relay_command, timeout=50.0)
+        if relay.returncode != 0:
+            self.target_relay_failures += 1
+            delay = self.hotspot_backoff(self.target_relay_failures)
+            self.target_relay_after = time.monotonic() + delay
+            self.local_hotspot_sync_after = min(self.local_hotspot_sync_after, self.target_relay_after)
+            detail = safe_detail(relay.stderr or relay.stdout, f"exit {relay.returncode}")
+            health["hotspot_target"] = f"error: {detail}"
+            self.log(f"local-hotspot-target: {detail}; retry in {int(delay)}s")
+            return health
+
+        self.target_relay_failures = 0
+        self.target_relay_after = 0.0
+        if fingerprint:
+            self.state.hotspot_relay_fingerprint = fingerprint
+        health["hotspot_target"] = "ready"
+        return health
+
+    def should_join_local_hotspot(self, policy: str) -> bool:
+        if policy == "off":
+            return False
+        if policy == "always":
+            return True
+        if policy != "if_disconnected":
+            self.log(f"local-hotspot join: invalid policy {policy!r}")
+            return False
+        wifi_connections = [
+            connection for connection in pdalink_lite.active_nm_connections()
+            if connection.type == "802-11-wireless"
+        ]
+        return not wifi_connections or all(
+            connection.name == pdalink_lite.LOCAL_HOTSPOT_PROFILE_NAME
+            for connection in wifi_connections
+        )
 
     def stop_service(self) -> None:
         if self.config.no_system_service or not self.state.service_owned:
@@ -412,11 +673,14 @@ class PdaLinkWatcher:
         if result.returncode == 0:
             self.state.service_owned = False
 
-    def remove_forward(self) -> None:
+    def remove_forward(self, device: pdalink_lite.AdbDevice | None = None) -> None:
         if not self.state.forward_owned:
             return
         result = self.run_write(
-            self.adb_command(["forward", "--remove", f"tcp:{self.config.local_port}"]),
+            self.adb_command(
+                ["forward", "--remove", f"tcp:{self.config.local_port}"],
+                serial=device.serial if device else self.state.device_serial,
+            ),
             timeout=10.0,
         )
         if result.returncode == 0:
@@ -427,82 +691,165 @@ class PdaLinkWatcher:
         mode: str,
         device: pdalink_lite.AdbDevice | None,
         error: str = "",
+        error_code: str = "",
+        health: dict[str, str] | None = None,
         stop_android: bool = True,
         stop_device: pdalink_lite.AdbDevice | None = None,
     ) -> int:
         self.stop_service()
-        self.remove_forward()
+        self.remove_forward(stop_device or device)
         if stop_android:
             self.stop_android(stop_device or device)
-        self.save_state(mode, device, error)
-        if error:
-            self.log(f"{mode}: {error}")
-        else:
-            self.log(mode)
+        changed = self.save_state(mode, device, error, error_code, health)
+        if changed:
+            if error:
+                self.log(f"{mode}: {error}")
+            else:
+                self.log(mode)
         return 1 if error else 0
 
     def reconcile(self) -> int:
         if self.config.transport == "product-usb":
             return self.reconcile_product_usb()
 
+        actions_ok, actions_error = self.process_actions()
+        if not actions_ok:
+            return self.cleanup(
+                "control-failed",
+                self.previous_device(),
+                actions_error,
+                "control-failed",
+                {"control": "error"},
+                stop_android=False,
+            )
+
         user_config = self.user_config()
         if user_config["auto_connect"] == "off":
-            return self.cleanup("auto-connect-off", None, "auto_connect is off", stop_device=self.previous_device())
+            return self.cleanup(
+                "auto-connect-off",
+                None,
+                "auto_connect is off",
+                "auto-connect-off",
+                {"device": "not-checked", "forward": "stopped", "proxy": "stopped", "system": "stopped"},
+                stop_device=self.previous_device(),
+            )
         if user_config["auto_connect"] == "when_offline":
             return self.cleanup(
                 "waiting-offline-policy",
                 None,
                 "auto_connect=when_offline is not implemented yet; use on_trusted_connect for automatic routing",
+                "offline-policy-unimplemented",
+                {"device": "not-checked", "forward": "stopped", "proxy": "stopped", "system": "stopped"},
                 stop_device=self.previous_device(),
             )
 
         devices, result = self.list_devices()
         if result.returncode != 0:
-            return self.cleanup("adb-missing", None, (result.stderr or result.stdout).strip() or "adb unavailable")
+            return self.cleanup(
+                "adb-missing",
+                None,
+                safe_detail(result.stderr or result.stdout, "adb unavailable"),
+                "adb-unavailable",
+                {"device": "error", "forward": "stopped", "proxy": "stopped", "system": "stopped"},
+            )
 
         device = self.choose_device(devices)
         if device is None:
             trust_reason = self.trust_block_reason(devices)
             if trust_reason:
-                return self.cleanup("waiting-trusted-device", None, trust_reason, stop_device=self.previous_device())
+                return self.cleanup(
+                    "waiting-trusted-device",
+                    None,
+                    trust_reason,
+                    "device-untrusted",
+                    {"device": "untrusted", "forward": "stopped", "proxy": "stopped", "system": "stopped"},
+                    stop_device=self.previous_device(),
+                )
             if devices:
                 states = ", ".join(f"{item.serial}:{item.state}" for item in devices)
-                return self.cleanup("waiting-adb-authorization", None, f"no authorized Android device ({states})")
-            return self.cleanup("waiting-usb", None, "no Android device listed")
+                return self.cleanup(
+                    "waiting-adb-authorization",
+                    None,
+                    f"no authorized Android device ({states})",
+                    "adb-authorization-required",
+                    {"device": "unauthorized", "forward": "stopped", "proxy": "stopped", "system": "stopped"},
+                )
+            return self.cleanup(
+                "waiting-usb",
+                None,
+                "no Android device listed",
+                "usb-disconnected",
+                {"device": "missing", "forward": "stopped", "proxy": "stopped", "system": "stopped"},
+            )
+
+        health = {"device": "ready", "forward": "checking", "proxy": "checking", "system": "checking"}
 
         preflight_forward = self.forward_check(device.serial)
         if preflight_forward.conflict:
-            return self.cleanup("forward-failed", device, preflight_forward.conflict, stop_android=False)
+            health.update({"forward": "conflict", "proxy": "not-checked", "system": "stopped"})
+            return self.cleanup(
+                "forward-failed",
+                device,
+                preflight_forward.conflict,
+                "forward-conflict",
+                health,
+                stop_android=False,
+            )
 
         proxy: ProxyCheck | None = None
         if preflight_forward.ok:
             self.state.forward_owned = preflight_forward.owned
+            health["forward"] = "ready"
             proxy = self.probe(self.config.effective_proxy_url, self.config.verify_timeout)
             if not proxy.ok:
                 ok, error = self.start_android(device)
                 if not ok:
-                    return self.cleanup("android-start-failed", device, error, stop_android=False)
+                    health.update({"proxy": "error", "system": "stopped"})
+                    return self.cleanup(
+                        "android-start-failed", device, error, "android-start-failed", health, stop_android=False
+                    )
         else:
             ok, error = self.start_android(device)
             if not ok:
-                return self.cleanup("android-start-failed", device, error, stop_android=False)
+                health.update({"forward": "missing", "proxy": "error", "system": "stopped"})
+                return self.cleanup(
+                    "android-start-failed", device, error, "android-start-failed", health, stop_android=False
+                )
             ok, error = self.ensure_forward(device)
             if not ok:
-                return self.cleanup("forward-failed", device, error)
+                health.update({"forward": "error", "proxy": "not-checked", "system": "stopped"})
+                return self.cleanup("forward-failed", device, error, "forward-create-failed", health)
+            health["forward"] = "ready"
 
         if proxy is None or not proxy.ok:
             proxy = self.probe(self.config.effective_proxy_url, self.config.verify_timeout)
+        if not proxy.ok and preflight_forward.ok and self.state.forward_owned:
+            self.remove_forward(device)
+            ok, error = self.ensure_forward(device)
+            if not ok:
+                health.update({"forward": "error", "proxy": "unreachable", "system": "stopped"})
+                return self.cleanup("forward-failed", device, error, "forward-repair-failed", health)
+            health["forward"] = "repaired"
+            proxy = self.probe(self.config.effective_proxy_url, self.config.verify_timeout)
         if not proxy.ok:
-            return self.cleanup("proxy-unreachable", device, proxy.detail)
+            health.update({"proxy": "unreachable", "system": "stopped"})
+            return self.cleanup(
+                "proxy-unreachable", device, proxy.detail, "proxy-unreachable", health
+            )
+        health["proxy"] = "ready"
 
         ok, error = self.start_service()
         if not ok:
-            return self.cleanup("service-start-failed", device, error)
+            health["system"] = "error"
+            return self.cleanup(
+                "service-start-failed", device, error, "system-service-failed", health
+            )
+        health["system"] = "ready"
 
-        self.sync_local_hotspot_credentials(device, user_config)
+        health.update(self.sync_local_hotspot_credentials(device, user_config))
 
-        self.save_state("ready", device)
-        self.log(f"ready: {device.serial} -> {self.config.effective_proxy_url}")
+        if self.save_state("ready", device, health=health):
+            self.log(f"ready: {device.serial} -> {self.config.effective_proxy_url}")
         return 0
 
     def cleanup_product_usb(self, mode: str, error: str = "") -> int:
@@ -566,6 +913,11 @@ class PdaLinkWatcher:
         print(f"proxy: {self.config.effective_proxy_url}", file=self.stdout)
         print(f"managed-forward: {'yes' if self.state.forward_owned else 'no'}", file=self.stdout)
         print(f"managed-service: {'yes' if self.state.service_owned else 'no'}", file=self.stdout)
+        print(f"mode: {self.state.mode}", file=self.stdout)
+        if self.state.last_transition_at:
+            print(f"last-transition: {self.state.last_transition_at}", file=self.stdout)
+        if self.state.last_resume_at:
+            print(f"last-resume: {self.state.last_resume_at}", file=self.stdout)
         if result.returncode != 0:
             print(f"adb: FAIL {(result.stderr or result.stdout).strip()}", file=self.stdout)
             return 1
@@ -588,6 +940,8 @@ class PdaLinkWatcher:
         print(f"system-service: {service}", file=self.stdout)
         if self.state.last_error:
             print(f"last-error: {self.state.last_error}", file=self.stdout)
+        for name, value in sorted(self.state.health.items()):
+            print(f"health-{name}: {value}", file=self.stdout)
         return 0
 
     def status_product_usb(self) -> int:
@@ -612,14 +966,31 @@ class PdaLinkWatcher:
     def run_loop(self, max_loops: int | None = None) -> int:
         loops = 0
         status = 0
+        last_awake = self.boot_clock()
         previous_handlers = install_stop_signal_handlers()
+        if self.config.enable_dbus and pdalink_dbus is not None:
+            self.dbus_server = pdalink_dbus.PdaLinkDbusServer(
+                state_file=self.config.state_file,
+                on_action=self.enqueue_action,
+                log=self.log,
+            )
+            self.dbus_server.start()
         try:
             while True:
+                now = self.boot_clock()
+                if loops and now - last_awake > max(10.0, self.config.poll_interval * 5.0):
+                    self.handle_resume()
                 status = self.reconcile()
                 loops += 1
                 if max_loops is not None and loops >= max_loops:
                     return status
-                self.sleeper(max(0.1, self.config.poll_interval))
+                last_awake = self.boot_clock()
+                delay = max(0.1, self.config.poll_interval)
+                if self.sleeper is time.sleep:
+                    self.wake_event.wait(delay)
+                    self.wake_event.clear()
+                else:
+                    self.sleeper(delay)
         except (KeyboardInterrupt, StopRequested):
             restore_signal_handlers(previous_handlers)
             previous_handlers = {}
@@ -627,6 +998,8 @@ class PdaLinkWatcher:
             device = self.choose_device(devices)
             return self.cleanup("stopped", device)
         finally:
+            if self.dbus_server is not None:
+                self.dbus_server.stop()
             restore_signal_handlers(previous_handlers)
 
 
@@ -665,6 +1038,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--trusted-devices-file", type=Path)
     parser.add_argument("--config-file", type=Path)
     parser.add_argument("--product-usb-state-file", type=Path)
+    parser.add_argument("--no-dbus", dest="enable_dbus", action="store_false")
     parser.add_argument("--no-dns", action="store_true")
     parser.add_argument("--tcp-idle-timeout", type=float, default=0.0)
     parser.add_argument("--verbose-system", action="store_true")
@@ -694,6 +1068,7 @@ def config_from_args(args: argparse.Namespace) -> WatchConfig:
         trusted_devices_file=args.trusted_devices_file,
         config_file=args.config_file,
         product_usb_state_file=args.product_usb_state_file,
+        enable_dbus=args.enable_dbus,
         no_dns=args.no_dns,
         tcp_idle_timeout=args.tcp_idle_timeout,
         verbose_system=args.verbose_system,

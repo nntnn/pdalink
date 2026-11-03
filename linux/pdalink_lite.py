@@ -19,12 +19,13 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse
 
 
 DEFAULT_HOST = "192.168.49.1"
@@ -59,6 +60,8 @@ TUN_DEVICE = Path("/dev/net/tun")
 DEFAULT_SYSTEM_STATE_FILE = "/run/pdalink/system.json"
 DEFAULT_AUTO_CONNECT = "off"
 DEFAULT_LOCAL_HOTSPOT_CREDENTIALS = "off"
+DEFAULT_LOCAL_HOTSPOT_JOIN = "off"
+DEFAULT_LOCAL_HOTSPOT_TARGET = "off"
 DEFAULT_ROUTE_MODE = "active_override"
 DEFAULT_DNS_MODE = "resolved"
 DEFAULT_ROUTE_METRIC = 50000
@@ -163,6 +166,17 @@ class LocalHotspotCredentials:
 
 
 @dataclass(frozen=True)
+class ConnectionBundle:
+    transport: str
+    ssid: str
+    security: str
+    password: str
+    proxy_url: str
+    host: str
+    port: int
+
+
+@dataclass(frozen=True)
 class AdbDevice:
     serial: str
     state: str
@@ -171,6 +185,129 @@ class AdbDevice:
     @property
     def ok(self) -> bool:
         return self.state == "device"
+
+
+CONNECTION_URI_VERSION = 1
+CONNECTION_URI_KEYS = frozenset(("v", "transport", "ssid", "security", "password", "proxy"))
+CONNECTION_TRANSPORTS = frozenset(("local-hotspot", "wifi-direct"))
+RFC1918_NETWORKS = tuple(ipaddress.ip_network(value) for value in (
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+))
+
+
+def normalize_connection_security(value: str) -> str:
+    normalized = value.strip().lower()
+    aliases = {
+        "wpa2-psk": "wpa2-psk",
+        "wpa3-sae": "wpa3-sae",
+        "wpa2-wpa3": "wpa2-wpa3",
+        "wpa2/wpa3 transition": "wpa2-wpa3",
+    }
+    try:
+        return aliases[normalized]
+    except KeyError as exc:
+        raise ValueError("unsupported Wi-Fi security mode") from exc
+
+
+def parse_connection_uri(raw: str) -> ConnectionBundle:
+    value = raw.strip()
+    if not value:
+        raise ValueError("connection URI is empty")
+    parsed = urlparse(value)
+    if (
+        parsed.scheme.lower() != "pdalink"
+        or parsed.hostname is None
+        or parsed.hostname.lower() != "connect"
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.params
+        or parsed.fragment
+    ):
+        raise ValueError("connection URI target is invalid")
+    try:
+        if parsed.port is not None:
+            raise ValueError("connection URI target is invalid")
+        pairs = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
+    except ValueError as exc:
+        raise ValueError("connection URI parameters are malformed") from exc
+    values: dict[str, str] = {}
+    for key, item in pairs:
+        if key not in CONNECTION_URI_KEYS:
+            raise ValueError(f"unknown connection URI parameter: {key}")
+        if key in values:
+            raise ValueError(f"duplicate connection URI parameter: {key}")
+        values[key] = item
+    missing = [key for key in CONNECTION_URI_KEYS if not values.get(key)]
+    if missing:
+        raise ValueError(f"missing connection URI parameter: {sorted(missing)[0]}")
+    if values["v"] != str(CONNECTION_URI_VERSION):
+        raise ValueError("unsupported connection URI version")
+
+    transport = values["transport"].strip().lower()
+    if transport not in CONNECTION_TRANSPORTS:
+        raise ValueError("unsupported Wi-Fi transport")
+    ssid = values["ssid"]
+    if not 1 <= len(ssid.encode("utf-8")) <= 32 or "\0" in ssid:
+        raise ValueError("SSID must be between 1 and 32 UTF-8 bytes")
+    password = values["password"]
+    if not 8 <= len(password) <= 63 or any(not 0x20 <= ord(char) <= 0x7e for char in password):
+        raise ValueError("Wi-Fi password must be 8-63 printable ASCII characters")
+    security = normalize_connection_security(values["security"])
+
+    proxy = urlparse(values["proxy"])
+    try:
+        proxy_port = proxy.port
+        proxy_address = ipaddress.ip_address(proxy.hostname or "")
+    except ValueError as exc:
+        raise ValueError("proxy endpoint is invalid") from exc
+    if (
+        proxy.scheme.lower() != "http"
+        or proxy.hostname is None
+        or proxy.username is not None
+        or proxy.password is not None
+        or proxy_port is None
+        or not 1 <= proxy_port <= 65535
+        or proxy.path
+        or proxy.params
+        or proxy.query
+        or proxy.fragment
+        or proxy_address.version != 4
+        or not any(proxy_address in network for network in RFC1918_NETWORKS)
+    ):
+        raise ValueError("proxy must be an HTTP endpoint on a private IPv4 address")
+    host = str(proxy_address)
+    return ConnectionBundle(
+        transport=transport,
+        ssid=ssid,
+        security=security,
+        password=password,
+        proxy_url=f"http://{host}:{proxy_port}",
+        host=host,
+        port=proxy_port,
+    )
+
+
+def build_connection_uri(bundle: ConnectionBundle) -> str:
+    raw = "pdalink://connect?" + urlencode({
+        "v": CONNECTION_URI_VERSION,
+        "transport": bundle.transport,
+        "ssid": bundle.ssid,
+        "security": bundle.security,
+        "password": bundle.password,
+        "proxy": bundle.proxy_url,
+    })
+    validated = parse_connection_uri(raw)
+    return "pdalink://connect?" + urlencode({
+        "v": CONNECTION_URI_VERSION,
+        "transport": validated.transport,
+        "ssid": validated.ssid,
+        "security": validated.security,
+        "password": validated.password,
+        "proxy": validated.proxy_url,
+    })
 
 
 @dataclass(frozen=True)
@@ -505,7 +642,7 @@ def prepare_local_hotspot_profile(
             "con-name", profile_name,
             "ssid", credentials.ssid,
             "wifi-sec.key-mgmt", key_management,
-            "wifi-sec.psk", credentials.password,
+            "wifi-sec.psk-flags", "1",
             *WIFI_DIRECT_PROFILE_SETTINGS,
         ]
     else:
@@ -513,7 +650,8 @@ def prepare_local_hotspot_profile(
             "nmcli", "connection", "modify", profile_name,
             "802-11-wireless.ssid", credentials.ssid,
             "wifi-sec.key-mgmt", key_management,
-            "wifi-sec.psk", credentials.password,
+            "wifi-sec.psk-flags", "1",
+            "wifi-sec.psk", "",
             *WIFI_DIRECT_PROFILE_SETTINGS,
         ]
     result = run_command(command, timeout=5.0)
@@ -524,8 +662,45 @@ def prepare_local_hotspot_profile(
     return profile_name
 
 
+def activate_connection_with_secret(
+        profile_name: str,
+        password: str,
+        iface: str | None = None,
+        timeout: float = 30.0) -> CommandResult:
+    """Activate a Wi-Fi profile without exposing its PSK in process arguments."""
+    runtime_dir = os.getenv("XDG_RUNTIME_DIR")
+    temp_dir = runtime_dir if runtime_dir and Path(runtime_dir).is_dir() else None
+    fd, raw_path = tempfile.mkstemp(prefix="pdalink-nm-secret-", dir=temp_dir, text=True)
+    secret_path = Path(raw_path)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as secret_file:
+            secret_file.write("802-11-wireless-security.psk:" + password + "\n")
+        command = ["nmcli", "connection", "up", profile_name]
+        if iface:
+            command.extend(["ifname", iface])
+        command.extend(["passwd-file", str(secret_path)])
+        return run_command(command, timeout=timeout)
+    finally:
+        try:
+            secret_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def local_hotspot_password_digest(credentials: LocalHotspotCredentials) -> str:
     return hashlib.sha256(credentials.password.encode("utf-8")).hexdigest()
+
+
+def local_hotspot_credential_fingerprint(credentials: LocalHotspotCredentials) -> str:
+    value = "\0".join((
+        credentials.ssid,
+        credentials.password,
+        credentials.host,
+        str(credentials.port),
+        credentials.security,
+    ))
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def local_hotspot_pin_mode(path: Path) -> int:
@@ -697,6 +872,85 @@ def connect_auto(args: argparse.Namespace) -> int:
     if status != 0:
         return status
     return verify_after_connect(args.host, parse_ports(args.ports), args.verify_timeout)
+
+
+def read_connection_uri(args: argparse.Namespace) -> str:
+    sources = sum((bool(args.uri), bool(args.image), bool(args.camera)))
+    if sources > 1:
+        raise ValueError("choose only one of --uri, --image, or --camera")
+    if args.uri:
+        return args.uri
+    if args.image or args.camera:
+        scanner = Path(__file__).resolve().parents[1] / "tools" / "scan_connection_qr.py"
+        command = [sys.executable, str(scanner)]
+        if args.image:
+            command.extend(("--image", args.image))
+        else:
+            command.extend(("--camera", str(args.camera_index)))
+        command.extend(("--timeout", str(args.scan_timeout)))
+        result = run_command(command, timeout=args.scan_timeout + 5.0)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip() or "QR scanner failed"
+            raise RuntimeError(detail)
+        return result.stdout.strip()
+    if sys.stdin.isatty():
+        raise ValueError("pass --uri, --image, --camera, or pipe a connection URI on stdin")
+    return sys.stdin.read(4096).strip()
+
+
+def connection_import(args: argparse.Namespace) -> int:
+    try:
+        bundle = parse_connection_uri(read_connection_uri(args))
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"connection import failed: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"transport: {bundle.transport}")
+    print(f"network: {bundle.ssid}")
+    print(f"security: {bundle.security}")
+    print(f"proxy: {bundle.proxy_url}")
+    if args.no_connect:
+        return 0
+
+    if bundle.transport == "local-hotspot":
+        credentials = LocalHotspotCredentials(
+            ssid=bundle.ssid,
+            password=bundle.password,
+            interface="",
+            host=bundle.host,
+            port=bundle.port,
+            security="WPA3-SAE" if bundle.security == "wpa3-sae" else "WPA2-PSK",
+        )
+        profile_name = prepare_local_hotspot_profile(
+            credentials,
+            LOCAL_HOTSPOT_PROFILE_NAME,
+            args.iface,
+        )
+    else:
+        profile_name = prepare_wifi_direct_profile(bundle.ssid, bundle.password, args.iface)
+    if not profile_name:
+        print("connection import failed: NetworkManager profile could not be prepared", file=sys.stderr)
+        return 1
+    if bundle.transport == "local-hotspot":
+        activation = activate_connection_with_secret(
+            profile_name,
+            bundle.password,
+            args.iface,
+            timeout=30.0,
+        )
+        if activation.returncode != 0:
+            detail = (activation.stderr or activation.stdout).strip() \
+                or f"nmcli exited {activation.returncode}"
+            print(f"connection import failed: {detail}", file=sys.stderr)
+            return activation.returncode or 1
+    else:
+        command = ["connection", "up", profile_name]
+        if args.iface:
+            command.extend(("ifname", args.iface))
+        status = run_nmcli(command)
+        if status != 0:
+            return status
+    return verify_after_connect(bundle.host, (bundle.port,), args.verify_timeout)
 
 
 def wifi_status(args: argparse.Namespace) -> int:
@@ -1698,6 +1952,8 @@ def system_start(args: argparse.Namespace) -> int:
         run_network_commands_best_effort(build_adapter_owned_tun_teardown_commands(config))
         adapter.close()
         return 1
+    if getattr(args, "tailscale_compat", False):
+        restart_active_tailscale_after_route_override(config)
     print(f"system internet: {config.iface} -> {config.proxy_url}")
     print(f"state: {state_path}")
     print("press Ctrl-C to stop and restore routes")
@@ -2436,6 +2692,44 @@ def run_privileged_network_commands(commands: list[list[str]]) -> int:
     return 0
 
 
+def restart_active_tailscale_after_route_override(config: SystemRouteConfig) -> bool:
+    """Reconnect an active tailscaled after active_override replaces its route."""
+    if config.route_mode != "active_override":
+        return False
+    systemctl = shutil.which("systemctl")
+    if not systemctl:
+        print("tailscale-compat: skipped; systemctl is unavailable")
+        return False
+    service = "tailscaled.service"
+    try:
+        active = subprocess.run(
+            [systemctl, "is-active", "--quiet", service],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10.0,
+        )
+        if active.returncode != 0:
+            print("tailscale-compat: skipped; tailscaled is not active")
+            return False
+        restarted = subprocess.run(
+            [systemctl, "try-restart", service],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=20.0,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"tailscale-compat: warning; could not restart active tailscaled: {exc}", file=sys.stderr)
+        return False
+    if restarted.returncode != 0:
+        detail = (restarted.stderr or restarted.stdout).strip() or f"systemctl exited {restarted.returncode}"
+        print(f"tailscale-compat: warning; active tailscaled restart failed: {detail}", file=sys.stderr)
+        return False
+    print("tailscale-compat: restarted active tailscaled after route override")
+    return True
+
+
 def run_network_commands_best_effort(commands: list[list[str]]) -> bool:
     ok = True
     for command in commands:
@@ -2686,7 +2980,8 @@ def parse_local_hotspot_broadcast(raw: str) -> LocalHotspotCredentials:
         raise ValueError("Local Hotspot endpoint is invalid") from exc
     if not ssid or len(ssid.encode("utf-8")) > 128:
         raise ValueError("Local Hotspot SSID is invalid")
-    if not 8 <= len(password) <= 63:
+    if not 8 <= len(password) <= 63 \
+            or any(not 0x20 <= ord(char) <= 0x7e for char in password):
         raise ValueError("Local Hotspot password is invalid")
     if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,32}", interface):
         raise ValueError("Local Hotspot interface is invalid")
@@ -2730,14 +3025,128 @@ def default_local_hotspot_pin_path() -> Path:
     return pdalink_config_dir() / "local-hotspot-pin.json"
 
 
+def default_local_hotspot_sync_state_path() -> Path:
+    return pdalink_state_dir() / "local-hotspot-sync.json"
+
+
+def local_hotspot_sync_state_matches(
+        path: Path,
+        credentials: LocalHotspotCredentials,
+        profile: str) -> bool:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("credential_sha256") != local_hotspot_credential_fingerprint(credentials):
+        return False
+    if payload.get("profile") != profile or saved_nm_connection_named(profile) is None:
+        return False
+    return nmcli_connection_ssid(profile) == credentials.ssid
+
+
+def local_hotspot_profile_active(
+        profile: str,
+        credentials: LocalHotspotCredentials,
+        iface: str | None) -> bool:
+    return any(
+        connection.name == profile and (not iface or connection.device == iface)
+        for connection in active_nm_connections(iface)
+    ) and nmcli_connection_ssid(profile) == credentials.ssid
+
+
+def write_local_hotspot_sync_state(
+        path: Path,
+        credentials: LocalHotspotCredentials,
+        profile: str) -> None:
+    atomic_write_json(path, {
+        "version": 1,
+        "credential_sha256": local_hotspot_credential_fingerprint(credentials),
+        "ssid": credentials.ssid,
+        "proxy_url": f"http://{credentials.host}:{credentials.port}",
+        "profile": profile,
+    })
+
+
+def validate_local_hotspot_target(target: str) -> str:
+    value = target.strip()
+    if value == "off":
+        return value
+    if not value or value.startswith("-") or not re.fullmatch(r"[A-Za-z0-9_.@:-]{1,255}", value):
+        raise ValueError("local_hotspot_target must be off or a safe SSH host/alias")
+    return value
+
+
+def local_hotspot_target_payload(credentials: LocalHotspotCredentials) -> str:
+    return json.dumps({
+        "version": 1,
+        "transport": "local-hotspot",
+        "ssid": credentials.ssid,
+        "password": credentials.password,
+        "interface": credentials.interface,
+        "host": credentials.host,
+        "port": credentials.port,
+        "security": credentials.security,
+    }, separators=(",", ":")) + "\n"
+
+
+def run_command_with_input(command: list[str], input_text: str, timeout: float) -> CommandResult:
+    try:
+        result = subprocess.run(
+            command,
+            input=input_text,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return CommandResult(1, "", str(exc))
+    return CommandResult(result.returncode, result.stdout, result.stderr)
+
+
+def relay_local_hotspot_credentials(
+        credentials: LocalHotspotCredentials,
+        target: str,
+        timeout: float = 45.0) -> CommandResult:
+    validated_target = validate_local_hotspot_target(target)
+    if validated_target == "off":
+        return CommandResult(0, "target sync disabled\n", "")
+    command = [
+        "ssh",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=5",
+        "-o", "StrictHostKeyChecking=yes",
+        validated_target,
+        "sudo", "-n", "/usr/local/sbin/pdalink-target-apply",
+    ]
+    return run_command_with_input(
+        command,
+        local_hotspot_target_payload(credentials),
+        timeout=timeout,
+    )
+
+
 def local_hotspot_sync(args: argparse.Namespace) -> int:
-    if args.start_android and adb_start_local_hotspot(args.serial) != 0:
-        return 1
-    deadline = time.monotonic() + max(0.0, args.wait)
-    while True:
+    credentials: LocalHotspotCredentials | None = None
+    if args.start_android:
         try:
             credentials = query_local_hotspot_credentials(args.serial)
-            break
+        except ValueError as exc:
+            if "inactive" not in str(exc).lower():
+                print(f"local-hotspot: {exc}", file=sys.stderr)
+                return 1
+        except RuntimeError as exc:
+            print(f"local-hotspot: {exc}", file=sys.stderr)
+            return 1
+        if credentials is None and adb_start_local_hotspot(args.serial) != 0:
+            return 1
+
+    deadline = time.monotonic() + max(0.0, args.wait)
+    while credentials is None:
+        try:
+            credentials = query_local_hotspot_credentials(args.serial)
         except ValueError as exc:
             if "inactive" not in str(exc).lower() or time.monotonic() >= deadline:
                 if args.if_active and "inactive" in str(exc).lower():
@@ -2751,18 +3160,34 @@ def local_hotspot_sync(args: argparse.Namespace) -> int:
         time.sleep(0.25)
 
     pin_path = Path(args.pin_file).expanduser() if args.pin_file else default_local_hotspot_pin_path()
-    try:
-        ok, status = apply_local_hotspot_credentials(
-            credentials,
-            mode=args.mode,
-            profile_name=args.profile,
-            pin_path=pin_path,
-            iface=args.iface,
-            reset_pin=args.reset_pin,
-        )
-    except ValueError as exc:
-        print(f"local-hotspot: {exc}", file=sys.stderr)
-        return 2
+    sync_state_raw = getattr(args, "sync_state_file", "")
+    sync_state_path = Path(sync_state_raw).expanduser() \
+        if sync_state_raw else default_local_hotspot_sync_state_path()
+    state_matches = local_hotspot_sync_state_matches(
+        sync_state_path,
+        credentials,
+        args.profile,
+    )
+    profile_active = local_hotspot_profile_active(
+        args.profile,
+        credentials,
+        args.iface,
+    )
+    if state_matches:
+        ok, status = True, "unchanged"
+    else:
+        try:
+            ok, status = apply_local_hotspot_credentials(
+                credentials,
+                mode=args.mode,
+                profile_name=args.profile,
+                pin_path=pin_path,
+                iface=args.iface,
+                reset_pin=args.reset_pin,
+            )
+        except ValueError as exc:
+            print(f"local-hotspot: {exc}", file=sys.stderr)
+            return 2
     if not ok:
         if status == "credential-mismatch":
             print(
@@ -2774,17 +3199,53 @@ def local_hotspot_sync(args: argparse.Namespace) -> int:
             print(f"local-hotspot: {status}", file=sys.stderr)
         return 1
     print(f"local-hotspot: {status}")
-    if not args.connect:
-        return 0
-    command = ["nmcli", "connection", "up", args.profile]
-    if args.iface:
-        command.extend(["ifname", args.iface])
-    result = run_command(command, timeout=30.0)
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip() or f"nmcli exited {result.returncode}"
-        print(f"local-hotspot: connection failed: {detail}", file=sys.stderr)
+    print(f"credential-fingerprint: {local_hotspot_credential_fingerprint(credentials)}")
+    if args.connect and (not state_matches or not profile_active):
+        result = activate_connection_with_secret(
+            args.profile,
+            credentials.password,
+            args.iface,
+            timeout=30.0,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip() or f"nmcli exited {result.returncode}"
+            print(f"local-hotspot: connection failed: {detail}", file=sys.stderr)
+            return 1
+        if verify_after_connect(credentials.host, (credentials.port,), args.verify_timeout) != 0:
+            return 1
+
+    if not state_matches:
+        write_local_hotspot_sync_state(sync_state_path, credentials, args.profile)
+
+    target = getattr(args, "target", "off")
+    if target != "off":
+        try:
+            relay = relay_local_hotspot_credentials(credentials, target)
+        except ValueError as exc:
+            print(f"local-hotspot target: {exc}", file=sys.stderr)
+            return 2
+        if relay.returncode != 0:
+            detail = (relay.stderr or relay.stdout).strip() or f"ssh exited {relay.returncode}"
+            print(f"local-hotspot target: sync failed: {detail}", file=sys.stderr)
+            return 1
+        print("local-hotspot target: updated")
+    return 0
+
+
+def local_hotspot_target_sync(args: argparse.Namespace) -> int:
+    try:
+        credentials = query_local_hotspot_credentials(args.serial)
+        relay = relay_local_hotspot_credentials(credentials, args.target)
+    except (RuntimeError, ValueError) as exc:
+        print(f"local-hotspot target: {exc}", file=sys.stderr)
+        return 2
+    if relay.returncode != 0:
+        detail = (relay.stderr or relay.stdout).strip() or f"ssh exited {relay.returncode}"
+        print(f"local-hotspot target: sync failed: {detail}", file=sys.stderr)
         return 1
-    return verify_after_connect(credentials.host, (credentials.port,), args.verify_timeout)
+    print("local-hotspot target: updated")
+    print(f"credential-fingerprint: {local_hotspot_credential_fingerprint(credentials)}")
+    return 0
 
 
 def print_adb_result(result: CommandResult) -> None:
@@ -2940,7 +3401,14 @@ def load_user_config(path: Path | None = None) -> dict[str, str]:
     if not isinstance(payload, dict):
         raise ValueError(f"invalid PdaLink config {target}: payload must be an object")
     config = default_user_config()
-    for key in ("auto_connect", "local_hotspot_credentials", "route_mode", "dns_mode", "notify"):
+    for key in (
+            "auto_connect",
+            "local_hotspot_credentials",
+            "local_hotspot_join",
+            "local_hotspot_target",
+            "route_mode",
+            "dns_mode",
+            "notify"):
         if key in payload:
             config[key] = str(payload[key])
     validate_user_config(config)
@@ -3044,6 +3512,8 @@ def default_user_config() -> dict[str, str]:
         "version": str(CONFIG_VERSION),
         "auto_connect": DEFAULT_AUTO_CONNECT,
         "local_hotspot_credentials": DEFAULT_LOCAL_HOTSPOT_CREDENTIALS,
+        "local_hotspot_join": DEFAULT_LOCAL_HOTSPOT_JOIN,
+        "local_hotspot_target": DEFAULT_LOCAL_HOTSPOT_TARGET,
         "route_mode": DEFAULT_ROUTE_MODE,
         "dns_mode": DEFAULT_DNS_MODE,
         "notify": "auto",
@@ -3055,6 +3525,9 @@ def validate_user_config(config: dict[str, str]) -> None:
         raise ValueError("auto_connect must be off, on_trusted_connect, or when_offline")
     if config.get("local_hotspot_credentials") not in ("off", "auto", "pinned"):
         raise ValueError("local_hotspot_credentials must be off, auto, or pinned")
+    if config.get("local_hotspot_join") not in ("off", "if_disconnected", "always"):
+        raise ValueError("local_hotspot_join must be off, if_disconnected, or always")
+    validate_local_hotspot_target(config.get("local_hotspot_target", ""))
     if config.get("route_mode") not in ("active_override", "fallback_low_priority"):
         raise ValueError("route_mode must be active_override or fallback_low_priority")
     if config.get("dns_mode") not in ("resolved", "off"):
@@ -3265,7 +3738,14 @@ def config_list(args: argparse.Namespace) -> int:
         return 0
     print("PdaLink config")
     print(f"file: {path}")
-    for key in ("auto_connect", "local_hotspot_credentials", "route_mode", "dns_mode", "notify"):
+    for key in (
+            "auto_connect",
+            "local_hotspot_credentials",
+            "local_hotspot_join",
+            "local_hotspot_target",
+            "route_mode",
+            "dns_mode",
+            "notify"):
         print(f"{key}: {config[key]}")
     return 0
 
@@ -3601,6 +4081,8 @@ def status_cmd(args: argparse.Namespace) -> int:
     print(ADB_TRANSPORT_LINE)
     print(f"auto_connect: {config['auto_connect']}")
     print(f"local_hotspot_credentials: {config['local_hotspot_credentials']}")
+    print(f"local_hotspot_join: {config['local_hotspot_join']}")
+    print(f"local_hotspot_target: {config['local_hotspot_target']}")
     print(f"route_mode: {config['route_mode']}")
     print(f"dns_mode: {config['dns_mode']}")
     print(f"trusted devices: {len(store.devices)}")
@@ -3740,15 +4222,39 @@ def build_parser() -> argparse.ArgumentParser:
     local_hotspot_sync_parser.add_argument("--mode", choices=("auto", "pinned"), default="auto")
     local_hotspot_sync_parser.add_argument("--profile", default=LOCAL_HOTSPOT_PROFILE_NAME)
     local_hotspot_sync_parser.add_argument("--pin-file", default="")
+    local_hotspot_sync_parser.add_argument("--sync-state-file", default="")
     local_hotspot_sync_parser.add_argument("--iface")
     local_hotspot_sync_parser.add_argument("--serial", default="")
     local_hotspot_sync_parser.add_argument("--connect", action="store_true")
+    local_hotspot_sync_parser.add_argument("--target", default="off")
     local_hotspot_sync_parser.add_argument("--reset-pin", action="store_true")
     local_hotspot_sync_parser.add_argument("--if-active", action="store_true")
     local_hotspot_sync_parser.add_argument("--start-android", action="store_true")
     local_hotspot_sync_parser.add_argument("--wait", type=float, default=10.0)
     local_hotspot_sync_parser.add_argument("--verify-timeout", type=float, default=15.0)
     local_hotspot_sync_parser.set_defaults(func=local_hotspot_sync)
+
+    local_hotspot_target_parser = sub.add_parser(
+        "local-hotspot-target-sync",
+        help="relay active Android Local Hotspot credentials to a configured Linux target",
+    )
+    local_hotspot_target_parser.add_argument("--serial", default="")
+    local_hotspot_target_parser.add_argument("--target", required=True)
+    local_hotspot_target_parser.set_defaults(func=local_hotspot_target_sync)
+
+    connection_import_parser = sub.add_parser(
+        "connection-import",
+        help="read a PdaLink connection URI or QR and connect with NetworkManager",
+    )
+    connection_import_parser.add_argument("--uri", default="", help="PdaLink connection URI")
+    connection_import_parser.add_argument("--image", default="", help="QR image path")
+    connection_import_parser.add_argument("--camera", action="store_true", help="scan from a camera")
+    connection_import_parser.add_argument("--camera-index", type=int, default=0)
+    connection_import_parser.add_argument("--scan-timeout", type=float, default=60.0)
+    connection_import_parser.add_argument("--iface")
+    connection_import_parser.add_argument("--verify-timeout", type=float, default=15.0)
+    connection_import_parser.add_argument("--no-connect", action="store_true")
+    connection_import_parser.set_defaults(func=connection_import)
 
     probe_parser = sub.add_parser("probe", help="probe Android proxy PAC endpoint")
     add_target_args(probe_parser)
@@ -3907,7 +4413,15 @@ def build_parser() -> argparse.ArgumentParser:
     add_config_storage_args(config_set_parser)
     config_set_parser.add_argument(
         "key",
-        choices=("auto_connect", "local_hotspot_credentials", "route_mode", "dns_mode", "notify"),
+        choices=(
+            "auto_connect",
+            "local_hotspot_credentials",
+            "local_hotspot_join",
+            "local_hotspot_target",
+            "route_mode",
+            "dns_mode",
+            "notify",
+        ),
     )
     config_set_parser.add_argument("value")
     config_set_parser.set_defaults(func=config_set)
@@ -3954,8 +4468,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     system_start_parser.add_argument("--no-start-android", dest="start_android", action="store_false")
     system_start_parser.add_argument("--no-probe-proxy", dest="probe_proxy", action="store_false")
+    system_start_parser.add_argument(
+        "--no-tailscale-compat",
+        dest="tailscale_compat",
+        action="store_false",
+        help="do not restart an active tailscaled after active_override routes are installed",
+    )
     system_start_parser.add_argument("--verify-timeout", type=float, default=15.0)
-    system_start_parser.set_defaults(func=system_start, start_android=True, probe_proxy=True)
+    system_start_parser.set_defaults(
+        func=system_start,
+        start_android=True,
+        probe_proxy=True,
+        tailscale_compat=True,
+    )
 
     system_adapter_parser = sub.add_parser(
         "system-adapter",

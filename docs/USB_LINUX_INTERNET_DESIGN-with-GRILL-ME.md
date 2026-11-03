@@ -399,6 +399,15 @@ ip route replace 128.0.0.0/1 dev pdalink0
 
 USB 1차 proxy endpoint는 `127.0.0.1:<local_port>`이므로 route loop가 없다.
 
+기존 장기 TCP 연결은 split default route 전환 뒤 새 경로로 이관되지 않는다.
+특히 이미 연결 중이던 `tailscaled` 제어 세션은 PdaLink가 최초 `SYN`을 보지 못했기
+때문에 멈출 수 있다. 따라서 built-in `system-start`는 route와 DNS 적용 및 runtime
+state 기록이 모두 성공한 뒤, `active_override`이고 `tailscaled.service`가 실행
+중인 경우에만 `systemctl try-restart tailscaled.service` 호환성 훅을 실행한다.
+비활성·미설치 상태와 `fallback_low_priority`에서는 실행하지 않으며,
+`--no-tailscale-compat`로 명시적으로 끌 수 있다. 재시작 실패는 PdaLink route를
+롤백하지 않고 경고로 기록한다.
+
 ### 7.3 Fallback Low Priority
 
 `fallback_low_priority`는 PdaLink를 최하위 fallback route로 둔다.
@@ -763,6 +772,7 @@ bash -n tools/*.sh
 - `fallback_low_priority` route 검증
 - no-proxy `curl -4 http://1.1.1.1/cdn-cgi/trace` 성공
 - DNS 기반 `curl -4 https://ifconfig.me` 또는 동등 테스트 성공
+- 실행 중이던 Tailscale이 `active_override` 전환 뒤 새 제어 연결과 DERP 경로로 복구
 - USB 분리 시 route/DNS/forward cleanup 성공
 - cleanup 후 기존 인터넷 경로 정상
 - cleanup 후 stale state 없음

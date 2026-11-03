@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="app_background">#0F141A</color>
+    <color name="surface">#171D24</color>
+    <color name="surface_variant">#232B35</color>
+    <color name="surface_selected">#233A5B</color>
+    <color name="text_primary">#EEF2F6</color>
+    <color name="text_secondary">#A9B3BF</color>
+    <color name="outline">#36404C</color>
+    <color name="primary">#8BB8FF</color>
+    <color name="on_primary">#0B2547</color>
+    <color name="success">#72D39B</color>
+    <color name="success_surface">#173527</color>
+    <color name="warning">#F2B85B</color>
+    <color name="warning_surface">#3B2D16</color>
+    <color name="error">#FFB4AB</color>
+    <color name="error_surface">#44211F</color>
+    <color name="idle">#B7C0CC</color>
+    <color name="idle_surface">#28313B</color>
+    <color name="code_surface">#11171D</color>
+    <color name="button_ripple">#338BB8FF</color>
+    <color name="button_danger_ripple">#33FFB4AB</color>
+    <color name="transparent">#00000000</color>
+</resources>

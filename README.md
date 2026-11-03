@@ -22,12 +22,13 @@ Start with:
 - `docs/DELIVERY_PLAN.md`
 - `docs/IMPLEMENTATION_PLAN.md`
 - `docs/MANUAL_TEST.md`
+- `docs/CONNECTION_QR.md`
 
 Prototype layout:
 
 - `android/`: Android app that serves the ADB USB proxy on loopback port `8000`
   and can concurrently serve either Wi-Fi Direct or a Local-Only Hotspot on
-  port `8001`.
+  port `8001`, plus a separate QR/VPN client app.
 - `linux/`: Python helper for NetworkManager connection, proxy probing, and
   curl-based smoke tests, including an ADB USB-forward proxy mode and an
   experimental TUN/system-routing control plane.
@@ -102,7 +103,7 @@ Non-GNOME desktops can continue to use `wifi env --probe`.
 Starting Wi-Fi Direct is additive: the Android USB proxy remains on
 `127.0.0.1:8000` for existing ADB forwards while the Direct proxy listens on
 `192.168.49.1:8001`. `wifi stop-android` removes only the Direct group and
-listener; it does not stop the USB proxy. Use the app's `Stop All` action or the
+listener; it does not stop the USB proxy. Use the app's `Stop all` action or the
 full Android `STOP` action only when both transports should stop.
 
 On Android 10 or later, the app can create the Direct group in Automatic,
@@ -115,9 +116,10 @@ only as the APK-install safety path. Restore and verify USB first, then turn the
 hotspot off before `wifi start-android`; the USB route keeps the laptop online
 while it joins the `DIRECT-*` network.
 
-Alternatively, tap `Add Local Hotspot` in the Android app. Android creates a
-local Wi-Fi network without a tethering upstream, and the app exposes its own
-internet proxy on the dynamic target shown in the summary. Multiple clients
+Alternatively, open `Connections`, select `Local Hotspot`, and tap
+`Apply Wi-Fi mode` in the Android app. Android creates a local Wi-Fi network
+without a tethering upstream, and the app exposes its own internet proxy on the
+dynamic target shown in `Overview`. Multiple clients
 can join that SSID and use the same proxy while USB remains active. The host
 must keep this Wi-Fi profile local-only, with no default gateway or DNS, because
 joining the SSID by itself does not route internet traffic through the phone.
@@ -130,6 +132,11 @@ copying the generated password:
 ./tools/pdalink.sh wifi local-hotspot sync --mode auto --start-android --connect
 ```
 
+`--start-android` is an ensure-active operation: it reuses the current
+reservation and sends a start request only when Android reports the hotspot as
+inactive. Repeating the command therefore does not rotate an active SSID or
+password.
+
 `auto` accepts each credential rotation and updates `pdalink-local-hotspot`.
 `pinned` accepts the first observed credentials, stores only their hash in a
 user-private file, and refuses to overwrite the profile after a rotation:
@@ -139,16 +146,71 @@ user-private file, and refuses to overwrite the profile after a rotation:
 ./tools/pdalink.sh wifi local-hotspot sync --mode pinned --reset-pin --connect
 ```
 
-The Android public Local-Only Hotspot API still chooses the SSID and password,
-so `pinned` is a host-side change guard, not a way to force a fixed AP password.
+On Android 15/API 35 and earlier, the public Local-Only Hotspot API chooses the
+SSID and password, so `pinned` is a host-side change guard, not a way to force a
+fixed AP password. Android 16/API 36 adds a custom-configuration API, but this
+build targets the current Android 15 phone and reports the Android-managed
+credential policy in `Connections`.
 PdaLink keeps one reservation alive and does not recreate it after a service
 restart or status refresh. Its credentials remain stable for that reservation.
 Stopping the hotspot releases Android's temporary, non-persisted configuration;
 the next explicit start on Android 15 should be treated as a credential rotation.
 Enable background profile refresh after trusted USB setup with
 `./tools/pdalink.sh config set local_hotspot_credentials auto` (or `pinned`).
-The watcher refreshes the profile only; it does not switch the active Wi-Fi
-connection automatically.
+Automatic joining remains opt-in. `if_disconnected` joins only when there is no
+unrelated active Wi-Fi connection (or the only Wi-Fi connection is the managed
+PdaLink profile); `always` may replace another active Wi-Fi connection:
+
+```bash
+./tools/pdalink.sh config set local_hotspot_join if_disconnected
+```
+
+On an ordinary Linux host, the Local Hotspot PSK is marked agent-owned in
+NetworkManager. PdaLink supplies it through a mode-`0600` one-use password file
+during activation, then removes that file, so the generated secret is not
+placed in process arguments or kept in the NetworkManager keyfile.
+
+The managed Raspberry Pi Zero is intentionally different: unattended reboot
+recovery requires the PSK to survive power loss. The restricted root target
+helper writes it only to NetworkManager's root-owned mode-`0600` system
+connection, enables autoconnect, and retries forever. The public target state
+still contains only the credential fingerprint. If Android actually rotates
+the reservation credentials, the Zero still needs the USB bootstrap path (or a
+future independent control channel) to receive the replacement secret.
+
+For Raspberry Pi Zero development, USB can also provide a stable management
+network while retaining the serial console. This is a bootstrap/control plane,
+not the intended product onboarding experience. On the Zero, install and test
+the ACM + NCM composite gadget before making it persistent, then install the
+restricted target helper:
+
+```bash
+sudo ./tools/setup_zero_usb_gadget.sh activate
+# From the host: verify ping/SSH to 10.55.0.1.
+sudo ./tools/setup_zero_usb_gadget.sh persist
+```
+
+On Linux, configure the USB interface and SSH alias, authorize the printed key
+on the Zero, then run `sudo ./tools/install_zero_target.sh` on the Zero and
+enable watcher relay:
+
+```bash
+./tools/setup_zero_usb_host.sh usb0
+./tools/pdalink.sh config set local_hotspot_credentials auto
+./tools/pdalink.sh config set local_hotspot_join if_disconnected
+./tools/pdalink.sh config set local_hotspot_target pdalink-zero
+```
+
+The watcher sends the validated snapshot over key-authenticated SSH stdin to a
+single no-argument sudo command. The Zero verifies that the SSID is actually on
+2.4 GHz, stores the NetworkManager system connection with
+`autoconnect=yes`, `autoconnect-retries=0`, and `psk-flags=0`, activates
+`wlan0`, probes the phone proxy, updates the client service, and keeps only a
+credential hash in root-private target state. Run the target installer after
+authorizing the printed SSH key; it then disables password SSH while the serial
+console remains available. The serial console is
+still available at the stable `usb-PdaLink_Zero_2_W_Control_pdalink-zero2w-*`
+device path.
 
 `wifi connect` marks the NetworkManager profile as local-only
 (`never-default`, ignored auto DNS, IPv6 ignored, no autoconnect) so an active
@@ -348,7 +410,9 @@ wrapper without `sudo`. It keeps pid, state, and log files under
 For native Linux daily use, run the watcher instead. It keeps the four-step USB
 flow managed in the background: watch ADB, start the Android debug proxy, create
 the USB forward and system route service, then clean up when the USB/debugging
-state disappears:
+state disappears. It also detects resume through logind (with a boot-clock gap
+fallback), rechecks the proxy, TUN, routes, and DNS, and repairs only resources
+that the watcher owns:
 
 ```bash
 ./tools/pdalink.sh device trust --connected --name my-phone --default
@@ -358,6 +422,23 @@ state disappears:
 ./tools/pdalink.sh watch status
 ./tools/pdalink.sh watch once
 ```
+
+Ubuntu also has a native GTK4/libadwaita client. It is a D-Bus control surface
+for the watcher; the UI never runs ADB, NetworkManager, or route commands
+itself. The installer creates its desktop entry by default, or it can be
+installed and opened separately:
+
+```bash
+sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1
+./tools/pdalink.sh client install
+./tools/pdalink.sh client run
+```
+
+The client shows separate device, USB-forward, Android-proxy, Ubuntu-tunnel,
+Local-Hotspot, target-relay, and resume-recovery stages. `Disconnect` changes
+the desired connection state but leaves the supervisor alive, so a later UI
+request or configured trusted-device policy can connect again. Opening the
+client also D-Bus-activates the watcher if it is not running.
 
 `autostart enable` keeps a user-level watcher running in the background. When a
 trusted USB-debugging phone is connected, the watcher starts the Android proxy,

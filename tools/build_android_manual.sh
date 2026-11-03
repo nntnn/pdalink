@@ -14,6 +14,7 @@ RES_DIR="$ROOT/android/app/src/main/res"
 RES_FLAT="$OUT_DIR/resources.zip"
 KEYSTORE="$ROOT/android/app/build/debug.keystore"
 LEGACY_KEYSTORE="$OUT_DIR/debug.keystore"
+ZXING_JAR="$ROOT/.tools/android-deps/core-3.5.3.jar"
 
 require_file() {
   if [[ ! -e "$1" ]]; then
@@ -28,6 +29,7 @@ require_file "$BUILD_TOOLS/aapt2"
 require_file "$BUILD_TOOLS/d8"
 require_file "$BUILD_TOOLS/zipalign"
 require_file "$BUILD_TOOLS/apksigner"
+require_file "$ZXING_JAR"
 
 java_major_version() {
   java -XshowSettings:properties -version 2>&1 \
@@ -83,12 +85,16 @@ fi
   --version-name 0.1.0 \
   "${LINK_INPUTS[@]}"
 
-mapfile -t JAVA_SOURCES < <(find "$ROOT/android/app/src/main/java" "$GEN_DIR" -name '*.java' -print)
+mapfile -t JAVA_SOURCES < <(find \
+  "$ROOT/android/app/src/main/java" \
+  "$ROOT/android/shared/src/main/java" \
+  "$GEN_DIR" \
+  -name '*.java' -print)
 
 java --add-modules jdk.compiler com.sun.tools.javac.Main \
   -source 8 \
   -target 8 \
-  -classpath "$ANDROID_JAR" \
+  -classpath "$ANDROID_JAR:$ZXING_JAR" \
   -d "$CLASS_DIR" \
   "${JAVA_SOURCES[@]}"
 
@@ -96,6 +102,7 @@ java --add-modules jdk.compiler com.sun.tools.javac.Main \
   --lib "$ANDROID_JAR" \
   --min-api 23 \
   --output "$DEX_DIR" \
+  "$ZXING_JAR" \
   $(find "$CLASS_DIR" -name '*.class' -print)
 
 cp "$OUT_DIR/app-unsigned.apk" "$OUT_DIR/app-with-dex.apk"

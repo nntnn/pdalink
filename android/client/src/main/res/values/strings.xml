@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PdaLink Client</string>
+    <string name="connection_code_label">Connection code</string>
+    <string name="connection_code_hint">pdalink://connect?&#8230;</string>
+    <string name="scan_qr">Scan QR</string>
+    <string name="scan_prompt">Scan the QR shown by the PdaLink host</string>
+    <string name="paste_code">Paste</string>
+    <string name="use_code">Use code</string>
+    <string name="connection_details_label">Connection</string>
+    <string name="network_label">Network</string>
+    <string name="transport_label">Transport</string>
+    <string name="proxy_label">Proxy</string>
+    <string name="connect">Connect</string>
+    <string name="disconnect">Disconnect</string>
+    <string name="status_stopped">Stopped</string>
+    <string name="status_ready">Ready</string>
+    <string name="status_starting">Starting</string>
+    <string name="status_connected">Connected</string>
+    <string name="status_error">Needs attention</string>
+    <string name="status_detail_format">%1$s\n%2$s</string>
+    <string name="clipboard_empty">Clipboard has no connection code.</string>
+    <string name="connection_required">Scan or paste a connection code first.</string>
+    <string name="vpn_permission_denied">VPN permission was not granted.</string>
+    <string name="wifi_permission_denied">Wi-Fi permission was not granted.</string>
+    <string name="waiting_for_wifi">Waiting for Android Wi-Fi approval</string>
+    <string name="checking_proxy">Checking the host proxy</string>
+    <string name="wifi_lost">The PdaLink Wi-Fi network was lost.</string>
+    <string name="wifi_unavailable">The PdaLink Wi-Fi request was declined or timed out.</string>
+    <string name="wifi_request_failed">Android could not start the Wi-Fi request.</string>
+    <string name="wifi_bind_failed">The VPN process could not bind to PdaLink Wi-Fi.</string>
+    <string name="proxy_unreachable_format">Host proxy check failed: %1$s</string>
+    <string name="vpn_setup_failed">Android could not create the VPN interface.</string>
+    <string name="tunnel_stopped_format">The packet engine stopped with code %1$d.</string>
+    <string name="already_running">A PdaLink VPN connection is already running.</string>
+    <string name="vpn_revoked">Android revoked VPN access.</string>
+    <string name="vpn_session">PdaLink HTTP tunnel</string>
+    <string name="notification_channel">PdaLink VPN</string>
+</resources>

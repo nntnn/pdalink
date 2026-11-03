@@ -8,6 +8,7 @@ BUILD_ANDROID=1
 INSTALL_ANDROID=1
 INSTALL_PRIVILEGES=1
 INSTALL_UDEV=1
+INSTALL_CLIENT=1
 DRY_RUN=0
 
 usage() {
@@ -24,6 +25,7 @@ Default actions:
   5. Install the limited native Linux privilege helper with sudo.
   6. If an authorized USB debugging device is attached, install the APK.
      If USB is missing or unauthorized, print the exact manual command.
+  7. Install the GTK4/libadwaita desktop client for the current user.
 
 Options:
   --apk PATH                 Use an existing debug APK
@@ -32,6 +34,7 @@ Options:
   --skip-android-install     Do not install the APK over ADB
   --skip-udev                Do not install Linux Android USB udev rules
   --skip-privileges          Do not run the native Linux privilege installer
+  --skip-client-install      Do not install the Ubuntu desktop client entry
   --dry-run                  Print actions without changing files or devices
   -h, --help                 Show this help
 
@@ -81,10 +84,19 @@ print_package_hint() {
 Missing required command(s): $missing
 
 Install the equivalent packages for your distribution, for example:
-  Debian/Ubuntu: sudo apt update && sudo apt install -y python3 curl unzip tar sudo iproute2
+  Debian/Ubuntu: sudo apt update && sudo apt install -y python3 python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 curl unzip tar sudo iproute2
   Fedora:        sudo dnf install -y python3 curl unzip tar sudo iproute
   Arch:          sudo pacman -S --needed python curl unzip tar sudo iproute2
 EOF
+}
+
+client_dependencies_ok() {
+  python3 - <<'PY' >/dev/null 2>&1
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gtk
+PY
 }
 
 preflight() {
@@ -111,6 +123,9 @@ preflight() {
   fi
   if ! python_ok; then
     fail "python3 3.10+ is required by the current PdaLink helper code"
+  fi
+  if [[ "$INSTALL_CLIENT" -eq 1 ]] && ! client_dependencies_ok; then
+    fail "GTK client dependencies are missing; install python3-gi, gir1.2-gtk-4.0, and gir1.2-adw-1 or pass --skip-client-install"
   fi
 
   if [[ -e /proc/sys/fs/binfmt_misc/WSLInterop || -n "${WSL_DISTRO_NAME:-}" ]]; then
@@ -240,6 +255,14 @@ Manual install later:
 EOF
 }
 
+install_linux_client() {
+  if [[ "$INSTALL_CLIENT" -eq 0 ]]; then
+    return
+  fi
+  log "Installing Ubuntu desktop client"
+  run "$ROOT/tools/pdalink.sh" client install
+}
+
 finish() {
   cat <<EOF
 
@@ -256,11 +279,20 @@ Inspect status from another shell:
   ./tools/pdalink.sh watch status
   ./tools/pdalink.sh system service status --proxy-url http://127.0.0.1:18080
 
+Open the Ubuntu client:
+
+  ./tools/pdalink.sh client run
+
 Refresh Android USB permissions later:
 
   ./tools/pdalink.sh rescue udev
 
-Stop/cleanup:
+Normal disconnect (the supervisor stays available):
+
+  Use Disconnect in the desktop client, or:
+  ./tools/pdalink.sh config set auto_connect off
+
+Maintenance-only foreground watcher stop/cleanup:
 
   Ctrl-C in the watcher shell
   ./tools/pdalink.sh system service stop --proxy-url http://127.0.0.1:18080
@@ -294,6 +326,10 @@ while [[ $# -gt 0 ]]; do
       INSTALL_PRIVILEGES=0
       shift
       ;;
+    --skip-client-install)
+      INSTALL_CLIENT=0
+      shift
+      ;;
     --dry-run)
       DRY_RUN=1
       shift
@@ -315,4 +351,5 @@ ensure_apk
 install_udev
 install_privileges
 install_android_app
+install_linux_client
 finish

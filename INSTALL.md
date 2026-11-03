@@ -21,8 +21,8 @@ cd pdalink
 
 The installer checks local prerequisites, bootstraps repo-local Android build
 tools, builds the debug APK, installs Android USB udev rules, installs the
-limited Linux privilege helper, and then handles the Android app based on USB
-state:
+limited Linux privilege helper, installs the per-user GTK desktop client, and
+then handles the Android app based on USB state:
 
 - Authorized USB debugging device attached: installs and starts the Android app.
 - USB device attached but unauthorized: asks you to approve the RSA prompt and
@@ -45,7 +45,15 @@ Then inspect the background watcher:
 curl -4 http://1.1.1.1/cdn-cgi/trace
 ```
 
-Stop with `Ctrl-C` in the watcher terminal. If you need an explicit cleanup:
+Open the native Ubuntu client from the application menu as `PdaLink`, or run:
+
+```bash
+./tools/pdalink.sh client run
+```
+
+Use the client's `Disconnect` action for normal use. It disables the desired
+connection and cleans up owned routes while leaving the supervisor available
+for reconnect and resume diagnostics. For maintenance-only cleanup:
 
 ```bash
 ./tools/pdalink.sh system service stop --proxy-url http://127.0.0.1:18080
@@ -57,6 +65,7 @@ The installer expects:
 
 - Linux with `/dev/net/tun` available for full system routing.
 - `python3` 3.10 or newer.
+- PyGObject with GTK4 and libadwaita introspection data.
 - `bash`, `curl`, `unzip`, `tar`, `sudo`, and `ip`.
 - ADB-visible Android phone with USB debugging enabled for automatic app
   installation.
@@ -64,10 +73,12 @@ The installer expects:
 Package examples:
 
 ```bash
-sudo apt update && sudo apt install -y python3 curl unzip tar sudo iproute2
+sudo apt update && sudo apt install -y python3 python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 curl unzip tar sudo iproute2
 sudo dnf install -y python3 curl unzip tar sudo iproute
 sudo pacman -S --needed python curl unzip tar sudo iproute2
 ```
+
+Pass `--skip-client-install` when preparing a headless host without GTK.
 
 The Android bootstrap downloads repo-local Android platform tools, command-line
 tools, Gradle, and Temurin JDK 17 when the system does not already have a

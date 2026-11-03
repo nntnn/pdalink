@@ -12,9 +12,13 @@ final class WifiDirectGroupOwnership {
             String expectedSsid,
             String expectedPassphrase,
             boolean createdThisSession,
+            boolean nativePeerNegotiated,
             String legacyOwnedSsid) {
         if (!groupOwner || actualSsid == null || actualSsid.isEmpty()) {
             return false;
+        }
+        if (nativePeerNegotiated || actualSsid.equals(legacyOwnedSsid)) {
+            return true;
         }
         if (configurableCredentials) {
             return actualPassphrase != null
@@ -23,6 +27,6 @@ final class WifiDirectGroupOwnership {
                     && actualSsid.equals(expectedSsid)
                     && actualPassphrase.equals(expectedPassphrase);
         }
-        return createdThisSession || actualSsid.equals(legacyOwnedSsid);
+        return createdThisSession;
     }
 }

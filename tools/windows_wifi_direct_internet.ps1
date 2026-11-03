@@ -3,7 +3,13 @@ param(
     [string]$Action = "start",
     [string]$Ssid = "",
     [Security.SecureString]$Password,
+    [ValidateSet("wpa2-psk", "wpa3-sae", "wpa2-wpa3")]
+    [string]$Security = "wpa2-psk",
     [string]$Interface = "",
+    [ValidateSet("wifi-direct", "local-hotspot")]
+    [string]$Transport = "wifi-direct",
+    [string]$ProxyAddress = "192.168.49.1",
+    [int]$ProxyPort = 8001,
     [string]$Url = "https://ifconfig.me",
     [string]$StatePath = "",
     [switch]$KeepWifi,
@@ -15,8 +21,10 @@ $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "windows_wifi_direct_common.ps1")
 
-$ProxyAddress = "192.168.49.1"
-$ProxyPort = 8001
+[void](Assert-PdaLinkPrivateIpv4 -Address $ProxyAddress)
+if ($ProxyPort -lt 1 -or $ProxyPort -gt 65535) {
+    throw "ProxyPort must be between 1 and 65535"
+}
 $PacUrl = "http://${ProxyAddress}:$ProxyPort/proxy.pac"
 $ExpectedProxyEndpoint = "${ProxyAddress}:$ProxyPort"
 $InternetSettingsPath = "Software\Microsoft\Windows\CurrentVersion\Internet Settings"
@@ -206,7 +214,8 @@ function Assert-PdaLinkProxyState {
     if ([int]$State.version -ne 1 -or [string]$State.owner -ne $StateOwner) {
         throw "invalid PdaLink proxy restore state owner or version"
     }
-    if ([string]$State.transport -ne "wifi-direct" -or [string]$State.manager -ne "wininet-pac") {
+    if ([string]$State.transport -notin @("wifi-direct", "local-hotspot") -or
+        [string]$State.manager -ne "wininet-pac") {
         throw "invalid PdaLink proxy restore state transport"
     }
     if ([string]$State.pac_url -ne $PacUrl -or [string]$State.proxy_endpoint -ne $ExpectedProxyEndpoint) {
@@ -253,6 +262,21 @@ function Read-PdaLinkProxyState {
     } catch {
         throw "invalid PdaLink proxy restore state $StatePath`: $($_.Exception.Message)"
     }
+    try {
+        $endpointUri = [Uri]("http://" + [string]$state.proxy_endpoint)
+        $endpointHost = Assert-PdaLinkPrivateIpv4 -Address $endpointUri.Host
+        if ($endpointUri.Port -lt 1 -or $endpointUri.Port -gt 65535 -or
+            $endpointUri.AbsolutePath -notin @("", "/") -or $endpointUri.Query -or $endpointUri.Fragment) {
+            throw "invalid endpoint"
+        }
+    } catch {
+        throw "invalid PdaLink proxy restore state endpoint"
+    }
+    $script:ProxyAddress = $endpointHost
+    $script:ProxyPort = [int]$endpointUri.Port
+    $script:Transport = [string]$state.transport
+    $script:PacUrl = "http://${ProxyAddress}:$ProxyPort/proxy.pac"
+    $script:ExpectedProxyEndpoint = "${ProxyAddress}:$ProxyPort"
     Assert-PdaLinkProxyState -State $state
     return $state
 }
@@ -326,11 +350,11 @@ function Start-PdaLinkWifiDirectInternet {
     $rollbackComplete = $false
     $profileCleanupComplete = $false
     try {
-        Write-PdaLinkStep "Connecting Windows to Android Wi-Fi Direct"
-        $wifi = Connect-PdaLinkWifiDirect -Ssid $Ssid -Password $Password -Interface $Interface
+        Write-PdaLinkStep "Connecting Windows to Android Wi-Fi"
+        $wifi = Connect-PdaLinkWifiDirect -Ssid $Ssid -Password $Password -Security $Security -Interface $Interface
 
-        Write-PdaLinkStep "Verifying trusted Wi-Fi Direct route and PAC"
-        $endpoint = Test-PdaLinkWifiDirectEndpoint -Interface $Interface
+        Write-PdaLinkStep "Verifying trusted Wi-Fi route and PAC"
+        $endpoint = Test-PdaLinkWifiDirectEndpoint -ProxyAddress $ProxyAddress -ProxyPort $ProxyPort -Interface $Interface
         Invoke-PdaLinkExplicitProxyTest
 
         Write-PdaLinkStep "Saving and applying the Windows user PAC"
@@ -339,7 +363,8 @@ function Start-PdaLinkWifiDirectInternet {
         $state = [pscustomobject]@{
             version = 1
             owner = $StateOwner
-            transport = "wifi-direct"
+            transport = $Transport
+            security = $Security
             manager = "wininet-pac"
             created_at = [DateTime]::UtcNow.ToString("o")
             pac_url = $PacUrl
@@ -413,7 +438,7 @@ function Get-PdaLinkProxyLifecycleStatus {
     }
     if ($owned) {
         try {
-        [void](Test-PdaLinkWifiDirectEndpoint -Interface ([string]$state.interface_alias) -TimeoutSeconds 3)
+        [void](Test-PdaLinkWifiDirectEndpoint -ProxyAddress $ProxyAddress -ProxyPort $ProxyPort -Interface ([string]$state.interface_alias) -TimeoutSeconds 3)
         return [pscustomobject]@{ state = "active"; detail = "PAC, route, and WinINET ownership verified"; payload = $state }
         } catch {
             return [pscustomobject]@{ state = "unreachable"; detail = $_.Exception.Message; payload = $state }

@@ -9,3 +9,7 @@ android/app/build/
 *.class
 __pycache__/
 .pytest_cache/
+ios/.build/
+ios/Vendor/
+ios/PdaLinkClient.xcodeproj/
+android/*/build/

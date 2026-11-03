@@ -1,0 +1,34 @@
+diff --git a/src/general_api.rs b/src/general_api.rs
+--- a/src/general_api.rs
++++ b/src/general_api.rs
+@@ -59,15 +59,21 @@
+     let args_clone = args.clone();
+     let res = rt.block_on(async move {
+         let ret = general_run_async(args_clone, tun_mtu, packet_information, shutdown_token).await;
+-        // Spawn a std thread to force exit after timeout so it isn't cancelled
+-        // when the tokio runtime is dropped.
+-        let _h = std::thread::spawn(move || {
+-            // Delay some seconds then try to exit current process if not exited yet, normally this case should not happen
+-            std::thread::sleep(crate::FORCE_EXIT_TIMEOUT);
+-            log::info!("Forcing exit now.");
+-            std::process::exit(-1);
+-        });
+-        tokio::time::sleep(std::time::Duration::from_micros(100)).await;
++        // iOS packet-tunnel extensions can be stopped and started again in the
++        // same process. The upstream force-exit watchdog would otherwise kill
++        // a newly started tunnel two seconds after the previous run returned.
++        #[cfg(not(target_os = "ios"))]
++        {
++            // Spawn a std thread to force exit after timeout so it isn't cancelled
++            // when the tokio runtime is dropped.
++            let _h = std::thread::spawn(move || {
++                // Delay some seconds then try to exit current process if not exited yet, normally this case should not happen
++                std::thread::sleep(crate::FORCE_EXIT_TIMEOUT);
++                log::info!("Forcing exit now.");
++                std::process::exit(-1);
++            });
++            tokio::time::sleep(std::time::Duration::from_micros(100)).await;
++        }
+         ret
+     });
+ 

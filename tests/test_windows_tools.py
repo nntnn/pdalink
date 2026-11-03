@@ -8,6 +8,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class WindowsToolScriptTest(unittest.TestCase):
+    def test_windows_connection_qr_supports_clipboard_camera_and_dynamic_proxy(self):
+        script = (ROOT / "tools" / "windows_connection_qr.ps1").read_text()
+
+        self.assertIn("ConvertFrom-PdaLinkConnectionUri", script)
+        self.assertIn("Get-Clipboard -Raw", script)
+        self.assertIn('"--camera", [string]$CameraIndex', script)
+        self.assertIn("ConvertTo-SecureString", script)
+        self.assertIn("ProxyAddress = [string]$bundle.proxy_address", script)
+        self.assertNotIn("Write-Host $($bundle.password)", script)
+
     def test_windows_wifi_direct_common_secures_credentials_and_trusts_exact_pac(self):
         common = (ROOT / "tools" / "windows_wifi_direct_common.ps1").read_text()
 
@@ -18,13 +28,15 @@ class WindowsToolScriptTest(unittest.TestCase):
         self.assertIn("[Xml.XmlWriter]::Create", common)
         self.assertIn('"connectionMode", $namespace, "manual"', common)
         self.assertIn('"autoSwitch", $namespace, "false"', common)
-        self.assertIn('"authentication", $namespace, "WPA2PSK"', common)
+        self.assertIn('$authentication = if ($Security -eq "wpa3-sae")', common)
+        self.assertIn('"authentication", $namespace, $authentication', common)
         self.assertIn('"encryption", $namespace, "AES"', common)
         self.assertIn('"user=current"', common)
         self.assertIn("Remove-Item -LiteralPath $tempPath", common)
         self.assertIn("finally", common)
         self.assertIn("Find-NetRoute -RemoteIPAddress", common)
-        self.assertIn('source_address -notlike "192.168.49.*"', common)
+        self.assertIn("Assert-PdaLinkPrivateIpv4 -Address $ProxyAddress", common)
+        self.assertIn('$route.next_hop -notin @("0.0.0.0", "")', common)
         self.assertIn('--noproxy "*"', common)
         self.assertIn("body does not match the canonical PdaLink PAC", common)
         self.assertIn('$normalized -cne $expected', common)
@@ -62,7 +74,7 @@ class WindowsToolScriptTest(unittest.TestCase):
         self.assertNotIn("New-NetRoute", script)
         self.assertNotIn("Set-DnsClientServerAddress", script)
 
-        verify_index = script.index("Test-PdaLinkWifiDirectEndpoint -Interface $Interface")
+        verify_index = script.index("Test-PdaLinkWifiDirectEndpoint -ProxyAddress $ProxyAddress")
         snapshot_index = script.index("$before = @(Get-InternetSettingsValues)")
         self.assertLess(verify_index, snapshot_index)
 
@@ -342,9 +354,9 @@ class WindowsToolScriptTest(unittest.TestCase):
         self.assertIn("EXTRA_TRAFFIC_DOWN_BYTES", actions)
         self.assertIn("getUpstreamBytes()", service)
         self.assertIn("getDownstreamBytes()", service)
-        self.assertIn("Internet usage:", activity)
-        self.assertIn("USB proxy:", activity)
-        self.assertIn("Wi-Fi proxy:", activity)
+        self.assertIn("R.string.detail_internet_usage", activity)
+        self.assertIn("R.string.detail_usb_proxy", activity)
+        self.assertIn("R.string.detail_wifi_proxy", activity)
         self.assertIn("ACTION_STOP_WIFI_DIRECT", actions)
         self.assertIn("entry + existing", activity)
 
@@ -383,7 +395,7 @@ class WindowsToolScriptTest(unittest.TestCase):
         self.assertIn("UsbManager.ACTION_USB_ACCESSORY_ATTACHED", activity)
         self.assertIn("requestPermission(accessory", activity)
         self.assertIn("sendProductUsbServiceAction(accessory)", activity)
-        self.assertIn("Start Product USB", activity)
+        self.assertIn("startProductUsb();", activity)
         self.assertIn("startProductUsbBridge()", service)
         self.assertIn("ProductUsbBridge", service)
         self.assertIn("openAccessory(accessory)", bridge)

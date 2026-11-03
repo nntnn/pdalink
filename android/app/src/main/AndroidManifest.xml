@@ -26,7 +26,10 @@
 
     <application
         android:allowBackup="false"
-        android:label="PdaLink Prototype"
+        android:icon="@drawable/ic_app"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.PdaLink"
         android:usesCleartextTraffic="true">
         <activity
             android:name=".MainActivity"

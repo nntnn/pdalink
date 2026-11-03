@@ -26,6 +26,102 @@ import pdalink_tun
 
 
 class LinuxCliTest(unittest.TestCase):
+    def test_connection_uri_round_trip_and_reserved_characters(self):
+        bundle = pdalink_lite.ConnectionBundle(
+            transport="local-hotspot",
+            ssid="Pda Link+1",
+            security="wpa2-wpa3",
+            password="pass&word=123",
+            proxy_url="http://10.111.107.245:8001",
+            host="10.111.107.245",
+            port=8001,
+        )
+
+        parsed = pdalink_lite.parse_connection_uri(pdalink_lite.build_connection_uri(bundle))
+
+        self.assertEqual(parsed, bundle)
+
+    def test_connection_uri_rejects_duplicate_and_public_proxy(self):
+        duplicate = (
+            "pdalink://connect?v=1&v=1&transport=local-hotspot&ssid=PdaLink"
+            "&security=wpa2-psk&password=password123&proxy=http%3A%2F%2F10.0.0.1%3A8001"
+        )
+        public = (
+            "pdalink://connect?v=1&transport=local-hotspot&ssid=PdaLink"
+            "&security=wpa2-psk&password=password123&proxy=http%3A%2F%2F8.8.8.8%3A8001"
+        )
+
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            pdalink_lite.parse_connection_uri(duplicate)
+        with self.assertRaisesRegex(ValueError, "private IPv4"):
+            pdalink_lite.parse_connection_uri(public)
+
+    def test_connection_import_prepares_local_hotspot_without_printing_password(self):
+        uri = pdalink_lite.build_connection_uri(pdalink_lite.ConnectionBundle(
+            transport="local-hotspot",
+            ssid="AndroidShare_1234",
+            security="wpa2-psk",
+            password="generated-secret",
+            proxy_url="http://10.111.107.245:8001",
+            host="10.111.107.245",
+            port=8001,
+        ))
+        args = argparse.Namespace(
+            uri=uri,
+            image="",
+            camera=False,
+            camera_index=0,
+            scan_timeout=1.0,
+            iface="wlp1s0",
+            verify_timeout=2.0,
+            no_connect=False,
+        )
+        stdout = io.StringIO()
+        with mock.patch.object(
+            pdalink_lite,
+            "prepare_local_hotspot_profile",
+            return_value="pdalink-local-hotspot",
+        ) as prepare, mock.patch.object(
+            pdalink_lite,
+            "activate_connection_with_secret",
+            return_value=pdalink_lite.CommandResult(0, "", ""),
+        ) as activate, \
+                mock.patch.object(pdalink_lite, "verify_after_connect", return_value=0) as verify, \
+                redirect_stdout(stdout):
+            self.assertEqual(pdalink_lite.connection_import(args), 0)
+
+        self.assertNotIn("generated-secret", stdout.getvalue())
+        self.assertEqual(prepare.call_args.args[1:], ("pdalink-local-hotspot", "wlp1s0"))
+        activate.assert_called_once_with(
+            "pdalink-local-hotspot",
+            "generated-secret",
+            "wlp1s0",
+            timeout=30.0,
+        )
+        verify.assert_called_once_with("10.111.107.245", (8001,), 2.0)
+
+    def test_local_hotspot_secret_is_passed_by_private_file_not_argv(self):
+        observed = {}
+
+        def fake_run(command, timeout):
+            observed["command"] = command
+            observed["secret"] = Path(command[-1]).read_text()
+            observed["mode"] = Path(command[-1]).stat().st_mode & 0o777
+            return pdalink_lite.CommandResult(0, "", "")
+
+        with mock.patch.object(pdalink_lite, "run_command", side_effect=fake_run):
+            result = pdalink_lite.activate_connection_with_secret(
+                "pdalink-local-hotspot",
+                "generated-secret",
+                "wlp1s0",
+            )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn("generated-secret", observed["command"])
+        self.assertEqual(observed["secret"], "802-11-wireless-security.psk:generated-secret\n")
+        self.assertEqual(observed["mode"], 0o600)
+        self.assertFalse(Path(observed["command"][-1]).exists())
+
     def local_hotspot_broadcast(self, **overrides):
         payload = {
             "ssid": "AndroidShare_1234",
@@ -69,6 +165,204 @@ class LinuxCliTest(unittest.TestCase):
             self.assertEqual(status, "updated")
             self.assertFalse((Path(tmp) / "pin.json").exists())
             prepare.assert_called_once_with(credentials, "pdalink-local-hotspot", "wlp1s0")
+
+    def test_prepare_local_hotspot_profile_does_not_put_secret_in_argv(self):
+        credentials = pdalink_lite.parse_local_hotspot_broadcast(self.local_hotspot_broadcast())
+        with mock.patch.object(pdalink_lite.shutil, "which", return_value="/usr/bin/nmcli"), \
+                mock.patch.object(pdalink_lite, "saved_nm_connection_named", return_value=None), \
+                mock.patch.object(
+                    pdalink_lite,
+                    "run_command",
+                    return_value=pdalink_lite.CommandResult(0, "", ""),
+                ) as run:
+            self.assertEqual(
+                pdalink_lite.prepare_local_hotspot_profile(
+                    credentials,
+                    "pdalink-local-hotspot",
+                    "wlp1s0",
+                ),
+                "pdalink-local-hotspot",
+            )
+
+        command = run.call_args.args[0]
+        self.assertNotIn("generated-secret", command)
+        self.assertIn("wifi-sec.psk-flags", command)
+
+    def test_target_relay_passes_secret_only_on_stdin(self):
+        credentials = pdalink_lite.parse_local_hotspot_broadcast(self.local_hotspot_broadcast())
+        with mock.patch.object(
+            pdalink_lite,
+            "run_command_with_input",
+            return_value=pdalink_lite.CommandResult(0, "target: updated\n", ""),
+        ) as run:
+            result = pdalink_lite.relay_local_hotspot_credentials(
+                credentials,
+                "pdalink-zero",
+            )
+
+        self.assertEqual(result.returncode, 0)
+        command, input_text = run.call_args.args[:2]
+        self.assertNotIn("generated-secret", command)
+        self.assertIn("generated-secret", input_text)
+        self.assertEqual(command[-3:], ["sudo", "-n", "/usr/local/sbin/pdalink-target-apply"])
+
+    def test_local_hotspot_sync_does_not_restart_an_active_reservation(self):
+        credentials = pdalink_lite.parse_local_hotspot_broadcast(self.local_hotspot_broadcast())
+        args = argparse.Namespace(
+            start_android=True,
+            serial="",
+            wait=1.0,
+            if_active=False,
+            mode="auto",
+            profile="pdalink-local-hotspot",
+            pin_file="",
+            iface="wlp1s0",
+            reset_pin=False,
+            connect=False,
+            verify_timeout=2.0,
+        )
+
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            pdalink_lite,
+            "query_local_hotspot_credentials",
+            return_value=credentials,
+        ) as query, mock.patch.object(pdalink_lite, "adb_start_local_hotspot") as start, \
+                mock.patch.object(pdalink_lite, "local_hotspot_sync_state_matches", return_value=False), \
+                mock.patch.object(pdalink_lite, "local_hotspot_profile_active", return_value=False), \
+                mock.patch.object(pdalink_lite, "apply_local_hotspot_credentials", return_value=(True, "unchanged")), \
+                redirect_stdout(stdout):
+            args.sync_state_file = str(Path(tmp) / "sync.json")
+            self.assertEqual(pdalink_lite.local_hotspot_sync(args), 0)
+
+        query.assert_called_once_with("")
+        start.assert_not_called()
+        self.assertIn("credential-fingerprint: ", stdout.getvalue())
+        self.assertNotIn(credentials.password, stdout.getvalue())
+
+    def test_local_hotspot_target_sync_is_independent_and_redacts_secret(self):
+        credentials = pdalink_lite.parse_local_hotspot_broadcast(self.local_hotspot_broadcast())
+        args = argparse.Namespace(serial="phone", target="pdalink-zero")
+        stdout = io.StringIO()
+        with mock.patch.object(
+            pdalink_lite,
+            "query_local_hotspot_credentials",
+            return_value=credentials,
+        ) as query, mock.patch.object(
+            pdalink_lite,
+            "relay_local_hotspot_credentials",
+            return_value=pdalink_lite.CommandResult(0, "target: updated\n", ""),
+        ) as relay, redirect_stdout(stdout):
+            self.assertEqual(pdalink_lite.local_hotspot_target_sync(args), 0)
+
+        query.assert_called_once_with("phone")
+        relay.assert_called_once_with(credentials, "pdalink-zero")
+        self.assertIn("local-hotspot target: updated", stdout.getvalue())
+        self.assertIn("credential-fingerprint: ", stdout.getvalue())
+        self.assertNotIn(credentials.password, stdout.getvalue())
+
+    def test_local_hotspot_target_failure_does_not_print_secret(self):
+        credentials = pdalink_lite.parse_local_hotspot_broadcast(self.local_hotspot_broadcast())
+        args = argparse.Namespace(serial="phone", target="pdalink-zero")
+        stderr = io.StringIO()
+        with mock.patch.object(
+            pdalink_lite,
+            "query_local_hotspot_credentials",
+            return_value=credentials,
+        ), mock.patch.object(
+            pdalink_lite,
+            "relay_local_hotspot_credentials",
+            return_value=pdalink_lite.CommandResult(255, "", "target unavailable"),
+        ), redirect_stderr(stderr):
+            self.assertEqual(pdalink_lite.local_hotspot_target_sync(args), 1)
+
+        self.assertIn("target unavailable", stderr.getvalue())
+        self.assertNotIn(credentials.password, stderr.getvalue())
+
+    def test_local_hotspot_sync_starts_android_only_when_inactive(self):
+        credentials = pdalink_lite.parse_local_hotspot_broadcast(self.local_hotspot_broadcast())
+        args = argparse.Namespace(
+            start_android=True,
+            serial="phone",
+            wait=1.0,
+            if_active=False,
+            mode="auto",
+            profile="pdalink-local-hotspot",
+            pin_file="",
+            iface="wlp1s0",
+            reset_pin=False,
+            connect=False,
+            verify_timeout=2.0,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            pdalink_lite,
+            "query_local_hotspot_credentials",
+            side_effect=(ValueError("Local Hotspot is inactive"), credentials),
+        ) as query, mock.patch.object(
+            pdalink_lite,
+            "adb_start_local_hotspot",
+            return_value=0,
+        ) as start, mock.patch.object(
+            pdalink_lite,
+            "apply_local_hotspot_credentials",
+            return_value=(True, "updated"),
+        ), mock.patch.object(
+            pdalink_lite,
+            "local_hotspot_sync_state_matches",
+            return_value=False,
+        ), mock.patch.object(
+            pdalink_lite,
+            "local_hotspot_profile_active",
+            return_value=False,
+        ):
+            args.sync_state_file = str(Path(tmp) / "sync.json")
+            self.assertEqual(pdalink_lite.local_hotspot_sync(args), 0)
+
+        self.assertEqual(query.call_count, 2)
+        start.assert_called_once_with("phone")
+
+    def test_local_hotspot_sync_does_not_reactivate_unchanged_active_profile(self):
+        credentials = pdalink_lite.parse_local_hotspot_broadcast(self.local_hotspot_broadcast())
+        args = argparse.Namespace(
+            start_android=False,
+            serial="phone",
+            wait=0.0,
+            if_active=False,
+            mode="auto",
+            profile="pdalink-local-hotspot",
+            pin_file="",
+            sync_state_file="",
+            iface="wlp1s0",
+            reset_pin=False,
+            connect=True,
+            target="off",
+            verify_timeout=2.0,
+        )
+
+        with mock.patch.object(
+            pdalink_lite,
+            "query_local_hotspot_credentials",
+            return_value=credentials,
+        ), mock.patch.object(
+            pdalink_lite,
+            "local_hotspot_sync_state_matches",
+            return_value=True,
+        ), mock.patch.object(
+            pdalink_lite,
+            "local_hotspot_profile_active",
+            return_value=True,
+        ), mock.patch.object(
+            pdalink_lite,
+            "apply_local_hotspot_credentials",
+        ) as apply, mock.patch.object(
+            pdalink_lite,
+            "activate_connection_with_secret",
+        ) as activate:
+            self.assertEqual(pdalink_lite.local_hotspot_sync(args), 0)
+
+        apply.assert_not_called()
+        activate.assert_not_called()
 
     def test_pinned_local_hotspot_sync_hashes_password_and_refuses_rotation(self):
         credentials = pdalink_lite.parse_local_hotspot_broadcast(self.local_hotspot_broadcast())
@@ -1766,11 +2060,14 @@ class LinuxCliTest(unittest.TestCase):
                 pdalink_lite.load_system_state(state_path)
 
     def test_system_start_writes_state_and_cleans_on_exit(self):
+        order = []
+
         class FakeAdapter:
             def __init__(self):
                 self.closed = False
 
             def run(self, *args, **kwargs):
+                order.append("adapter-run")
                 return None
 
             def close(self):
@@ -1788,6 +2085,20 @@ class LinuxCliTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             state_file = str(Path(tmp) / "system.json")
+            real_write_system_state = pdalink_lite.write_system_state
+
+            def write_system_state(*write_args, **write_kwargs):
+                order.append("state")
+                return real_write_system_state(*write_args, **write_kwargs)
+
+            def install_routes(_commands):
+                order.append("routes")
+                return 0
+
+            def tailscale_after_routes(_config):
+                order.append("tailscale")
+                return True
+
             args = argparse.Namespace(
                 iface="pdalink0",
                 address="10.66.0.2/24",
@@ -1804,12 +2115,27 @@ class LinuxCliTest(unittest.TestCase):
                 verify_timeout=15.0,
                 state_file=state_file,
                 tcp_idle_timeout=12.5,
+                tailscale_compat=True,
             )
             stdout = io.StringIO()
             with mock.patch.object(pdalink_lite.os, "geteuid", return_value=0), \
                     mock.patch.dict(sys.modules, {"pdalink_tun": mock.Mock(TunHttpAdapter=FakeTunHttpAdapter)}), \
                     mock.patch.object(pdalink_lite, "existing_tun_route_conflicts", return_value=[]), \
-                    mock.patch.object(pdalink_lite, "run_privileged_network_commands", return_value=0), \
+                    mock.patch.object(
+                        pdalink_lite,
+                        "run_privileged_network_commands",
+                        side_effect=install_routes,
+                    ), \
+                    mock.patch.object(
+                        pdalink_lite,
+                        "write_system_state",
+                        side_effect=write_system_state,
+                    ), \
+                    mock.patch.object(
+                        pdalink_lite,
+                        "restart_active_tailscale_after_route_override",
+                        side_effect=tailscale_after_routes,
+                    ) as tailscale_compat, \
                     mock.patch.object(pdalink_lite, "run_network_commands_best_effort") as cleanup, \
                     redirect_stdout(stdout):
                 self.assertEqual(pdalink_lite.system_start(args), 0)
@@ -1818,15 +2144,76 @@ class LinuxCliTest(unittest.TestCase):
             cleanup.assert_called_once()
             self.assertIn("state:", stdout.getvalue())
             self.assertEqual(FakeTunHttpAdapter.opened_kwargs["tcp_idle_timeout"], 12.5)
+            tailscale_compat.assert_called_once()
+            self.assertEqual(order, ["routes", "state", "tailscale", "adapter-run"])
 
     def test_system_runtime_args_default_to_no_tcp_idle_cleanup(self):
         parser = pdalink_lite.build_parser()
 
         start_args = parser.parse_args(["system-start"])
+        no_compat_args = parser.parse_args(["system-start", "--no-tailscale-compat"])
         adapter_args = parser.parse_args(["system-adapter"])
 
         self.assertEqual(start_args.tcp_idle_timeout, 0.0)
+        self.assertTrue(start_args.tailscale_compat)
+        self.assertFalse(no_compat_args.tailscale_compat)
         self.assertEqual(adapter_args.tcp_idle_timeout, 0.0)
+
+    def test_tailscale_compat_restarts_only_active_service_for_active_override(self):
+        config = pdalink_lite.SystemRouteConfig(
+            iface="pdalink0",
+            address="10.66.0.2/24",
+            mtu=1500,
+            routes=("0.0.0.0/1", "128.0.0.0/1"),
+            proxy_url="http://127.0.0.1:18080",
+            route_mode="active_override",
+        )
+        results = [
+            mock.Mock(returncode=0, stdout="", stderr=""),
+            mock.Mock(returncode=0, stdout="", stderr=""),
+        ]
+
+        with mock.patch.object(pdalink_lite.shutil, "which", return_value="/usr/bin/systemctl"), \
+                mock.patch.object(pdalink_lite.subprocess, "run", side_effect=results) as run, \
+                redirect_stdout(io.StringIO()):
+            self.assertTrue(pdalink_lite.restart_active_tailscale_after_route_override(config))
+
+        self.assertEqual(run.call_args_list[0].args[0], [
+            "/usr/bin/systemctl", "is-active", "--quiet", "tailscaled.service",
+        ])
+        self.assertEqual(run.call_args_list[1].args[0], [
+            "/usr/bin/systemctl", "try-restart", "tailscaled.service",
+        ])
+
+    def test_tailscale_compat_skips_inactive_service_and_fallback_route(self):
+        active_config = pdalink_lite.SystemRouteConfig(
+            iface="pdalink0",
+            address="10.66.0.2/24",
+            mtu=1500,
+            routes=("0.0.0.0/1", "128.0.0.0/1"),
+            proxy_url="http://127.0.0.1:18080",
+            route_mode="active_override",
+        )
+        fallback_config = pdalink_lite.SystemRouteConfig(
+            iface="pdalink0",
+            address="10.66.0.2/24",
+            mtu=1500,
+            routes=("0.0.0.0/1", "128.0.0.0/1"),
+            proxy_url="http://127.0.0.1:18080",
+            route_mode="fallback_low_priority",
+        )
+
+        with mock.patch.object(pdalink_lite.shutil, "which", return_value="/usr/bin/systemctl"), \
+                mock.patch.object(
+                    pdalink_lite.subprocess,
+                    "run",
+                    return_value=mock.Mock(returncode=3, stdout="inactive\n", stderr=""),
+                ) as run, \
+                redirect_stdout(io.StringIO()):
+            self.assertFalse(pdalink_lite.restart_active_tailscale_after_route_override(active_config))
+            self.assertFalse(pdalink_lite.restart_active_tailscale_after_route_override(fallback_config))
+
+        run.assert_called_once()
 
     def test_system_start_preserves_state_when_cleanup_fails(self):
         class FakeAdapter:
@@ -2438,10 +2825,18 @@ class LinuxCliTest(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             state_path = Path(tmp) / "system.json"
+            runtime_path = Path(tmp) / "installed" / "pdalink_lite.py"
+            runtime_path.parent.mkdir()
+            runtime_path.write_text(
+                "#!/usr/bin/env python3\n# deliberately stale runtime\n",
+                encoding="utf-8",
+            )
             pdalink_lite.write_system_state(state_path, config)
             payload = json.loads(state_path.read_text(encoding="utf-8"))
             payload["pid"] = os.getpid()
-            payload["cmdline"] = "python3 /opt/pdalink/linux/pdalink_lite.py system-start --tcp-idle-timeout 0.0"
+            payload["cmdline"] = (
+                f"python3 {runtime_path} system-start --tcp-idle-timeout 0.0"
+            )
             state_path.write_text(json.dumps(payload), encoding="utf-8")
             args = argparse.Namespace(
                 iface="pdalink0",
@@ -2466,8 +2861,11 @@ class LinuxCliTest(unittest.TestCase):
                 self.assertEqual(pdalink_lite.system_status(args), 0)
 
         output = stdout.getvalue()
-        self.assertIn("state-cmdline: python3 /opt/pdalink/linux/pdalink_lite.py system-start --tcp-idle-timeout 0.0", output)
-        self.assertIn("runtime-binary: /opt/pdalink/linux/pdalink_lite.py", output)
+        self.assertIn(
+            f"state-cmdline: python3 {runtime_path} system-start --tcp-idle-timeout 0.0",
+            output,
+        )
+        self.assertIn(f"runtime-binary: {runtime_path}", output)
         self.assertIn(f"checkout-binary: {Path(pdalink_lite.__file__).resolve()}", output)
         self.assertIn("runtime-drift: YES", output)
 

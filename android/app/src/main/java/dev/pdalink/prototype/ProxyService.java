@@ -12,20 +12,27 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
+import android.net.MacAddress;
 import android.net.wifi.SoftApConfiguration;
 import android.net.wifi.WifiConfiguration;
 import android.net.wifi.WifiManager;
 import android.net.wifi.p2p.WifiP2pConfig;
+import android.net.wifi.p2p.WifiP2pDevice;
 import android.net.wifi.p2p.WifiP2pGroup;
 import android.net.wifi.p2p.WifiP2pManager;
+import android.net.wifi.WpsInfo;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.util.Log;
 
 import java.security.SecureRandom;
+import java.net.Inet4Address;
+import java.net.InetAddress;
 import java.net.SocketException;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 
@@ -40,11 +47,17 @@ public class ProxyService extends Service {
     private static final String PREF_WIFI_DIRECT_SSID = "wifi_direct_ssid";
     private static final String PREF_WIFI_DIRECT_PASSPHRASE = "wifi_direct_passphrase";
     private static final String PREF_WIFI_DIRECT_LEGACY_OWNED_SSID = "wifi_direct_legacy_owned_ssid";
+    private static final String PREF_WIFI_DIRECT_NATIVE_PEER =
+            "wifi_direct_native_peer";
     private static final String WIFI_DIRECT_HOST = "192.168.49.1";
     private static final String WIFI_DIRECT_CLIENT_PREFIX = "192.168.49.";
     private static final String USB_HOST = "127.0.0.1";
     private static final int[] USB_PROXY_CANDIDATE_PORTS = new int[]{8000};
     private static final int[] WIFI_PROXY_CANDIDATE_PORTS = new int[]{8001};
+    private static final int MAX_BROADCAST_SESSIONS = 64;
+    private static final int MAX_BROADCAST_RECENT_SESSIONS = 20;
+    private static final long WIFI_DIRECT_CLIENT_DROP_RECOVERY_DELAY_MS = 45000L;
+    private static final long WIFI_DIRECT_NATIVE_NEGOTIATION_TIMEOUT_MS = 35000L;
 
     private enum Mode {USB, PRODUCT_USB, WIFI_DIRECT, LOCAL_HOTSPOT}
 
@@ -74,9 +87,16 @@ public class ProxyService extends Service {
     private String requestedWifiBand = WifiDirectBand.AUTO;
     private int groupFrequencyMhz;
     private int wifiGroupClientCount;
+    private String wifiGroupClientAddress = "";
     private boolean wifiGroupOwned;
     private boolean wifiGroupCreationAccepted;
+    private boolean wifiNativePeerNegotiationAccepted;
+    private boolean wifiNativePeerReconnectEnabled;
+    private String wifiNativePeerNegotiationAddress = "";
     private boolean wifiGroupOperationInProgress;
+    private int wifiClientRecoveryGeneration;
+    private int wifiNativePeerNegotiationGeneration;
+    private String pendingWifiDirectPeer = "";
     private String lastRequest = "";
     private String lastError = "";
     private String productUsbStatus = "permission missing";
@@ -123,6 +143,11 @@ public class ProxyService extends Service {
         if (ProxyActions.ACTION_START_WIFI_DIRECT.equals(action)) {
             boolean switching = localHotspotEnabled || localHotspotReservation != null;
             stopLocalHotspot();
+            wifiProxyHost = WIFI_DIRECT_HOST;
+            wifiClientPrefix = WIFI_DIRECT_CLIENT_PREFIX;
+            wifiNativePeerReconnectEnabled = false;
+            pendingWifiDirectPeer = "";
+            cancelWifiDirectClientDropRecovery();
             setWifiDirectEnabled(true);
             ensureUsbProxyServer();
             Runnable start = () -> {
@@ -138,6 +163,15 @@ public class ProxyService extends Service {
                 start.run();
             }
             status("Transports " + modeLabel() + " active");
+            return START_STICKY;
+        }
+        if (ProxyActions.ACTION_INVITE_WIFI_DIRECT_PEER.equals(action)) {
+            ensureUsbProxyServer();
+            inviteWifiDirectPeer(
+                    intent.getStringExtra(ProxyActions.EXTRA_WIFI_P2P_PEER),
+                    intent.getBooleanExtra(
+                            ProxyActions.EXTRA_WIFI_P2P_RENEGOTIATE,
+                            false));
             return START_STICKY;
         }
         if (ProxyActions.ACTION_START_LOCAL_HOTSPOT.equals(action)) {
@@ -240,6 +274,10 @@ public class ProxyService extends Service {
     @Override
     public void onDestroy() {
         LocalHotspotDebugState.clear();
+        wifiDirectEnabled = false;
+        localHotspotEnabled = false;
+        wifiGroupOwned = false;
+        wifiGroupClientCount = 0;
         if (mainHandler != null) {
             mainHandler.removeCallbacksAndMessages(null);
         }
@@ -251,10 +289,12 @@ public class ProxyService extends Service {
         closeWifiProxyServer();
         closeUsbProxyServer();
         closeProductUsbBridge();
+        productUsbStatus = "not active";
         if (networkSelector != null) {
             networkSelector.close();
             networkSelector = null;
         }
+        broadcastStoppedStatus();
         super.onDestroy();
     }
 
@@ -280,9 +320,12 @@ public class ProxyService extends Service {
         usbProxyServer = new HttpProxyServer(
                 this,
                 USB_HOST,
+                "",
                 USB_PROXY_CANDIDATE_PORTS,
                 host -> networkSelector.openSocket(host.host, host.port),
-                this::status);
+                this::status,
+                "USB",
+                this::broadcastSnapshot);
         usbProxyServer.start();
         clearProxyStartupError(usbProxyServer);
         status("USB proxy: " + usbProxySummary());
@@ -305,7 +348,9 @@ public class ProxyService extends Service {
                 wifiClientPrefix,
                 WIFI_PROXY_CANDIDATE_PORTS,
                 host -> networkSelector.openSocket(host.host, host.port),
-                this::status);
+                this::status,
+                wifiTransportLabel(),
+                this::broadcastSnapshot);
         wifiProxyServer.start();
         clearProxyStartupError(wifiProxyServer);
         status(wifiTransportLabel() + " proxy: " + wifiProxySummary());
@@ -350,16 +395,305 @@ public class ProxyService extends Service {
             @Override
             public void onReceive(Context context, Intent intent) {
                 String action = intent.getAction();
-                if (WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION.equals(action)
-                        || WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION.equals(action)) {
+                if (WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION.equals(action)) {
+                    WifiP2pGroup group = connectionChangedGroup(intent);
+                    if (group != null) {
+                        publishGroupInfo(group);
+                    } else {
+                        requestGroupInfo();
+                    }
+                } else if (WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION.equals(action)) {
                     requestGroupInfo();
+                }
+                if (WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION.equals(action)
+                        && !pendingWifiDirectPeer.isEmpty()) {
+                    requestPendingWifiDirectPeer();
                 }
             }
         };
         IntentFilter filter = new IntentFilter();
         filter.addAction(WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION);
         filter.addAction(WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION);
+        filter.addAction(WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION);
         registerReceiver(p2pReceiver, filter);
+    }
+
+    private WifiP2pGroup connectionChangedGroup(Intent intent) {
+        if (Build.VERSION.SDK_INT >= 33) {
+            return intent.getParcelableExtra(
+                    WifiP2pManager.EXTRA_WIFI_P2P_GROUP,
+                    WifiP2pGroup.class);
+        }
+        @SuppressWarnings("deprecation")
+        WifiP2pGroup group =
+                intent.getParcelableExtra(WifiP2pManager.EXTRA_WIFI_P2P_GROUP);
+        return group;
+    }
+
+    private void inviteWifiDirectPeer(String address, boolean renegotiate) {
+        if (!wifiDirectEnabled) {
+            status("Cannot invite Wi-Fi Direct peer while the group is stopped");
+            return;
+        }
+        String normalized = WifiDirectPeerAddress.normalize(address);
+        if (normalized.isEmpty()) {
+            status("Cannot invite Wi-Fi Direct peer; invalid device address");
+            return;
+        }
+        setupWifiP2p();
+        if (wifiP2pManager == null || wifiP2pChannel == null) {
+            status("Cannot invite Wi-Fi Direct peer; P2P manager unavailable");
+            return;
+        }
+        wifiNativePeerReconnectEnabled = true;
+        clearNativePeerNegotiationAcceptance();
+        pendingWifiDirectPeer = normalized;
+        if (renegotiate) {
+            removeOwnedGroupForNativePeerNegotiation();
+            return;
+        }
+        discoverPendingWifiDirectPeer();
+    }
+
+    private void removeOwnedGroupForNativePeerNegotiation() {
+        try {
+            wifiP2pManager.requestGroupInfo(wifiP2pChannel, group -> {
+                if (group == null) {
+                    cancelPendingNativePeerConnection();
+                    return;
+                }
+                if (!isOwnedWifiGroup(group)) {
+                    pendingWifiDirectPeer = "";
+                    status("Cannot negotiate native peer through an unowned Wi-Fi Direct group");
+                    return;
+                }
+                wifiGroupOperationInProgress = true;
+                status("Removing current Wi-Fi Direct group for native peer negotiation");
+                wifiP2pManager.removeGroup(
+                        wifiP2pChannel,
+                        new WifiP2pManager.ActionListener() {
+                            @Override
+                            public void onSuccess() {
+                                wifiGroupOperationInProgress = false;
+                                wifiGroupOwned = false;
+                                wifiGroupCreationAccepted = false;
+                                clearGroupInfo();
+                                status("Current group removed for native peer negotiation");
+                                mainHandler.postDelayed(
+                                        ProxyService.this::discoverPendingWifiDirectPeer,
+                                        500L);
+                            }
+
+                            @Override
+                            public void onFailure(int reason) {
+                                wifiGroupOperationInProgress = false;
+                                pendingWifiDirectPeer = "";
+                                status("Cannot remove group for native peer negotiation: "
+                                        + p2pReason(reason));
+                            }
+                        });
+            });
+        } catch (SecurityException ex) {
+            pendingWifiDirectPeer = "";
+            status("Cannot prepare native peer negotiation; permission missing");
+        } catch (RuntimeException ex) {
+            pendingWifiDirectPeer = "";
+            status("Cannot prepare native peer negotiation: " + ex.getMessage());
+        }
+    }
+
+    private void cancelPendingNativePeerConnection() {
+        wifiGroupOperationInProgress = true;
+        status("Clearing pending Wi-Fi Direct negotiation");
+        WifiP2pManager.ActionListener listener = new WifiP2pManager.ActionListener() {
+            @Override
+            public void onSuccess() {
+                finishPendingNativePeerCancellation();
+            }
+
+            @Override
+            public void onFailure(int reason) {
+                status("Pending Wi-Fi Direct negotiation was already clear: "
+                        + p2pReason(reason));
+                finishPendingNativePeerCancellation();
+            }
+        };
+        try {
+            wifiP2pManager.cancelConnect(wifiP2pChannel, listener);
+        } catch (SecurityException ex) {
+            wifiGroupOperationInProgress = false;
+            pendingWifiDirectPeer = "";
+            status("Cannot clear pending Wi-Fi Direct negotiation; permission missing");
+        } catch (RuntimeException ex) {
+            wifiGroupOperationInProgress = false;
+            pendingWifiDirectPeer = "";
+            status("Cannot clear pending Wi-Fi Direct negotiation: " + ex.getMessage());
+        }
+    }
+
+    private void finishPendingNativePeerCancellation() {
+        wifiGroupOperationInProgress = false;
+        if (!pendingWifiDirectPeer.isEmpty()) {
+            mainHandler.postDelayed(
+                    ProxyService.this::discoverPendingWifiDirectPeer,
+                    500L);
+        }
+    }
+
+    private void discoverPendingWifiDirectPeer() {
+        if (pendingWifiDirectPeer.isEmpty()
+                || wifiP2pManager == null
+                || wifiP2pChannel == null) {
+            return;
+        }
+        String normalized = pendingWifiDirectPeer;
+        status("Discovering native Wi-Fi Direct peer " + normalized);
+        try {
+            wifiP2pManager.discoverPeers(wifiP2pChannel, new WifiP2pManager.ActionListener() {
+                @Override
+                public void onSuccess() {
+                    status("Native Wi-Fi Direct peer discovery accepted");
+                    mainHandler.postDelayed(
+                            ProxyService.this::requestPendingWifiDirectPeer,
+                            1000L);
+                }
+
+                @Override
+                public void onFailure(int reason) {
+                    pendingWifiDirectPeer = "";
+                    status("Native Wi-Fi Direct peer discovery rejected: " + p2pReason(reason));
+                }
+            });
+        } catch (SecurityException ex) {
+            pendingWifiDirectPeer = "";
+            status("Cannot discover native Wi-Fi Direct peer; permission missing");
+        } catch (RuntimeException ex) {
+            pendingWifiDirectPeer = "";
+            status("Cannot discover native Wi-Fi Direct peer: " + ex.getMessage());
+        }
+    }
+
+    private void requestPendingWifiDirectPeer() {
+        if (pendingWifiDirectPeer.isEmpty()
+                || wifiP2pManager == null
+                || wifiP2pChannel == null) {
+            return;
+        }
+        try {
+            wifiP2pManager.requestPeers(wifiP2pChannel, peers -> {
+                if (pendingWifiDirectPeer.isEmpty()) {
+                    return;
+                }
+                for (WifiP2pDevice peer : peers.getDeviceList()) {
+                    if (WifiDirectPeerAddress.matches(
+                            pendingWifiDirectPeer,
+                            peer.deviceAddress)) {
+                        connectWifiDirectPeer(peer);
+                        return;
+                    }
+                }
+                status("Native Wi-Fi Direct peer not visible yet");
+            });
+        } catch (SecurityException ex) {
+            pendingWifiDirectPeer = "";
+            status("Cannot inspect native Wi-Fi Direct peers; permission missing");
+        } catch (RuntimeException ex) {
+            pendingWifiDirectPeer = "";
+            status("Cannot inspect native Wi-Fi Direct peers: " + ex.getMessage());
+        }
+    }
+
+    private void connectWifiDirectPeer(WifiP2pDevice peer) {
+        String address = pendingWifiDirectPeer;
+        pendingWifiDirectPeer = "";
+        WifiP2pConfig config = buildNativePeerConfig(peer.deviceAddress);
+        markNativePeerNegotiationAccepted(address);
+        status("Inviting native Wi-Fi Direct peer " + address);
+        try {
+            wifiP2pManager.connect(wifiP2pChannel, config, new WifiP2pManager.ActionListener() {
+                @Override
+                public void onSuccess() {
+                    status("Native Wi-Fi Direct peer invitation accepted");
+                }
+
+                @Override
+                public void onFailure(int reason) {
+                    clearNativePeerNegotiationAcceptance();
+                    status("Native Wi-Fi Direct peer invitation rejected: " + p2pReason(reason));
+                    scheduleRememberedNativePeerReconnect();
+                }
+            });
+        } catch (SecurityException ex) {
+            clearNativePeerNegotiationAcceptance();
+            status("Cannot invite native Wi-Fi Direct peer; permission missing");
+            scheduleRememberedNativePeerReconnect();
+        } catch (RuntimeException ex) {
+            clearNativePeerNegotiationAcceptance();
+            status("Cannot invite native Wi-Fi Direct peer: " + ex.getMessage());
+            scheduleRememberedNativePeerReconnect();
+        }
+    }
+
+    private WifiP2pConfig buildNativePeerConfig(String deviceAddress) {
+        WifiP2pConfig config;
+        if (Build.VERSION.SDK_INT >= 29) {
+            config = buildModernNativePeerConfig(deviceAddress);
+        } else {
+            config = new WifiP2pConfig();
+            config.deviceAddress = deviceAddress;
+        }
+        config.groupOwnerIntent = WifiP2pConfig.GROUP_OWNER_INTENT_MAX;
+        config.wps.setup = WpsInfo.PBC;
+        return config;
+    }
+
+    @TargetApi(29)
+    private WifiP2pConfig buildModernNativePeerConfig(String deviceAddress) {
+        return new WifiP2pConfig.Builder()
+                .setDeviceAddress(MacAddress.fromString(deviceAddress))
+                .setGroupOperatingBand(WifiDirectBand.toPlatformBand(requestedWifiBand))
+                .enablePersistentMode(false)
+                .build();
+    }
+
+    private void markNativePeerNegotiationAccepted(String address) {
+        wifiNativePeerNegotiationAccepted = true;
+        wifiNativePeerNegotiationAddress = WifiDirectPeerAddress.normalize(address);
+        int generation = ++wifiNativePeerNegotiationGeneration;
+        mainHandler.postDelayed(() -> {
+            if (generation == wifiNativePeerNegotiationGeneration
+                    && wifiNativePeerNegotiationAccepted
+                    && !wifiGroupOwned) {
+                wifiNativePeerNegotiationAccepted = false;
+                wifiNativePeerNegotiationAddress = "";
+                if (wifiNativePeerReconnectEnabled
+                        && wifiDirectEnabled
+                        && !wifiGroupOperationInProgress
+                        && pendingWifiDirectPeer.isEmpty()
+                        && !loadRememberedNativePeerAddress().isEmpty()) {
+                    reconnectRememberedNativePeerOrCreateGroup(false);
+                }
+            }
+        }, WIFI_DIRECT_NATIVE_NEGOTIATION_TIMEOUT_MS);
+    }
+
+    private void clearNativePeerNegotiationAcceptance() {
+        wifiNativePeerNegotiationAccepted = false;
+        wifiNativePeerNegotiationAddress = "";
+        wifiNativePeerNegotiationGeneration++;
+    }
+
+    private void scheduleRememberedNativePeerReconnect() {
+        mainHandler.postDelayed(() -> {
+            if (wifiNativePeerReconnectEnabled
+                    && wifiDirectEnabled
+                    && !wifiGroupOwned
+                    && !wifiGroupOperationInProgress
+                    && pendingWifiDirectPeer.isEmpty()
+                    && !loadRememberedNativePeerAddress().isEmpty()) {
+                reconnectRememberedNativePeerOrCreateGroup(false);
+            }
+        }, 35000L);
     }
 
     private void clearWifiReceiver() {
@@ -380,6 +714,7 @@ public class ProxyService extends Service {
         }
         wifiGroupOwned = false;
         wifiGroupCreationAccepted = false;
+        clearNativePeerNegotiationAcceptance();
         try {
             wifiP2pManager.removeGroup(wifiP2pChannel, new SimpleActionListener("removeGroup"));
         } catch (RuntimeException ignored) {
@@ -389,10 +724,14 @@ public class ProxyService extends Service {
 
     private void stopWifiDirect() {
         setWifiDirectEnabled(false);
+        wifiNativePeerReconnectEnabled = false;
+        pendingWifiDirectPeer = "";
+        cancelWifiDirectClientDropRecovery();
         wifiGroupOperationInProgress = false;
         removeWifiGroupBestEffort();
         wifiGroupOwned = false;
         wifiGroupCreationAccepted = false;
+        clearNativePeerNegotiationAcceptance();
         clearWifiReceiver();
         closeWifiProxyServer();
         clearGroupInfo();
@@ -479,6 +818,7 @@ public class ProxyService extends Service {
         wifiGroupOperationInProgress = false;
         wifiGroupOwned = false;
         wifiGroupCreationAccepted = false;
+        clearNativePeerNegotiationAcceptance();
         clearWifiReceiver();
         closeWifiProxyServer();
         clearGroupInfo();
@@ -765,6 +1105,7 @@ public class ProxyService extends Service {
         wifiSecurity = "";
         groupFrequencyMhz = 0;
         wifiGroupClientCount = 0;
+        wifiGroupClientAddress = "";
     }
 
     private String valueOrEmpty(String value) {
@@ -787,14 +1128,29 @@ public class ProxyService extends Service {
                     handleExistingGroup(group);
                     return;
                 }
-                createGroupInternal(true);
+                reconnectRememberedNativePeerOrCreateGroup(true);
             });
         } catch (SecurityException ex) {
             status("Cannot read group info; permission missing");
         } catch (RuntimeException ex) {
             status("requestGroupInfo failed: " + ex.getMessage());
-            createGroupInternal(true);
+            reconnectRememberedNativePeerOrCreateGroup(true);
         }
+    }
+
+    private void reconnectRememberedNativePeerOrCreateGroup(boolean retryAfterBusy) {
+        if (!wifiNativePeerReconnectEnabled) {
+            createGroupInternal(retryAfterBusy);
+            return;
+        }
+        String rememberedPeer = loadRememberedNativePeerAddress();
+        if (rememberedPeer.isEmpty()) {
+            createGroupInternal(retryAfterBusy);
+            return;
+        }
+        pendingWifiDirectPeer = rememberedPeer;
+        status("Searching for remembered native Wi-Fi Direct peer " + rememberedPeer);
+        cancelPendingNativePeerConnection();
     }
 
     private void createGroupInternal(boolean retryAfterBusy) {
@@ -825,6 +1181,7 @@ public class ProxyService extends Service {
         try {
             wifiGroupOperationInProgress = true;
             wifiGroupCreationAccepted = false;
+            clearNativePeerNegotiationAcceptance();
             if (WifiDirectBand.supportsSelection()) {
                 wifiP2pManager.createGroup(wifiP2pChannel, buildWifiP2pConfig(), listener);
             } else {
@@ -884,7 +1241,7 @@ public class ProxyService extends Service {
                     wifiGroupCreationAccepted = false;
                     clearGroupInfo();
                     status("Previous Wi-Fi Direct group removed for band switch");
-                    createGroupInternal(false);
+                    reconnectRememberedNativePeerOrCreateGroup(false);
                 }
 
                 @Override
@@ -929,7 +1286,7 @@ public class ProxyService extends Service {
     private void retryCreateGroupOnce() {
         mainHandler.postDelayed(() -> {
             if (wifiDirectEnabled) {
-                createGroupInternal(false);
+                reconnectRememberedNativePeerOrCreateGroup(false);
             }
         }, 1000);
     }
@@ -953,12 +1310,28 @@ public class ProxyService extends Service {
             return;
         }
         if (group == null) {
+            boolean reconnectRememberedPeer =
+                    wifiNativePeerReconnectEnabled
+                            && wifiGroupOwned
+                            && !wifiGroupOperationInProgress
+                            && pendingWifiDirectPeer.isEmpty()
+                            && !loadRememberedNativePeerAddress().isEmpty();
             closeWifiProxyServer();
             wifiGroupOwned = false;
             wifiGroupCreationAccepted = false;
             clearGroupInfo();
             status("Wi-Fi Direct group not active yet");
             updateNotification();
+            if (reconnectRememberedPeer) {
+                mainHandler.postDelayed(() -> {
+                    if (wifiDirectEnabled
+                            && !wifiGroupOwned
+                            && !wifiGroupOperationInProgress
+                            && pendingWifiDirectPeer.isEmpty()) {
+                        reconnectRememberedNativePeerOrCreateGroup(false);
+                    }
+                }, 500L);
+            }
             return;
         }
         if (!isOwnedWifiGroup(group)) {
@@ -989,6 +1362,10 @@ public class ProxyService extends Service {
         status("Group band: " + WifiDirectBand.frequencyLabel(groupFrequencyMhz)
                 + " (requested " + WifiDirectBand.label(requestedWifiBand) + ")"
                 + "; clients " + wifiGroupClientCount);
+        status("Group client address: "
+                + (wifiGroupClientAddress.isEmpty()
+                ? "not reported; Zero probe fallback enabled"
+                : wifiGroupClientAddress));
         status("Wi-Fi Direct proxy target: " + wifiTarget());
         updateNotification();
     }
@@ -1010,18 +1387,134 @@ public class ProxyService extends Service {
                 credentials[0],
                 credentials[1],
                 wifiGroupCreationAccepted,
+                wifiNativePeerNegotiationAccepted,
                 loadLegacyOwnedGroupSsid());
     }
 
     private void acceptOwnedWifiGroup(WifiP2pGroup group) {
+        boolean nativePeerNegotiated = wifiNativePeerNegotiationAccepted;
+        String nativePeerAddress = wifiNativePeerNegotiationAddress;
         wifiGroupOwned = true;
-        wifiGroupClientCount = group.getClientList() == null ? 0 : group.getClientList().size();
-        if (!WifiDirectBand.supportsSelection() && wifiGroupCreationAccepted) {
+        int previousClientCount = wifiGroupClientCount;
+        int currentClientCount =
+                group.getClientList() == null ? 0 : group.getClientList().size();
+        wifiGroupClientCount = currentClientCount;
+        wifiGroupClientAddress = groupClientAddress(group);
+        if (currentClientCount > 0) {
+            cancelWifiDirectClientDropRecovery();
+        } else if (WifiDirectClientRecovery.shouldSchedule(
+                previousClientCount,
+                currentClientCount,
+                wifiDirectEnabled,
+                wifiGroupOperationInProgress)) {
+            scheduleWifiDirectClientDropRecovery();
+        }
+        if ((!WifiDirectBand.supportsSelection() && wifiGroupCreationAccepted)
+                || nativePeerNegotiated) {
             rememberLegacyOwnedGroupSsid(valueOrEmpty(group.getNetworkName()));
         }
+        if (nativePeerNegotiated) {
+            rememberNativePeerAddress(nativePeerAddress);
+        }
         wifiGroupCreationAccepted = false;
-        if (lastError.startsWith("Cannot use active Wi-Fi Direct group because PdaLink does not own it")) {
+        clearNativePeerNegotiationAcceptance();
+        if (lastError.startsWith("Cannot use active Wi-Fi Direct group because PdaLink does not own it")
+                || lastError.startsWith("Group client address: unavailable")) {
             lastError = "";
+        }
+    }
+
+    private String groupClientAddress(WifiP2pGroup group) {
+        if (Build.VERSION.SDK_INT < 35 || group.getClientList() == null) {
+            return "";
+        }
+        return groupClientAddressApi35(group);
+    }
+
+    @TargetApi(35)
+    private String groupClientAddressApi35(WifiP2pGroup group) {
+        for (WifiP2pDevice client : group.getClientList()) {
+            InetAddress address = client.getIpAddress();
+            if (address instanceof Inet4Address) {
+                return address.getHostAddress();
+            }
+        }
+        return "";
+    }
+
+    private void scheduleWifiDirectClientDropRecovery() {
+        int generation = ++wifiClientRecoveryGeneration;
+        status("Wi-Fi Direct client left; checking whether the group needs recovery");
+        mainHandler.postDelayed(() -> {
+            if (generation != wifiClientRecoveryGeneration
+                    || !wifiDirectEnabled
+                    || wifiGroupOperationInProgress
+                    || wifiP2pManager == null
+                    || wifiP2pChannel == null) {
+                return;
+            }
+            try {
+                wifiP2pManager.requestGroupInfo(wifiP2pChannel, group -> {
+                    if (generation != wifiClientRecoveryGeneration
+                            || !wifiDirectEnabled
+                            || wifiGroupOperationInProgress
+                            || group == null
+                            || !isOwnedWifiGroup(group)
+                            || (group.getClientList() != null
+                                    && !group.getClientList().isEmpty())) {
+                        return;
+                    }
+                    recreateGroupAfterClientDrop();
+                });
+            } catch (SecurityException ex) {
+                status("Cannot recover Wi-Fi Direct client drop; permission missing");
+            } catch (RuntimeException ex) {
+                status("Cannot inspect Wi-Fi Direct client drop: " + ex.getMessage());
+            }
+        }, WIFI_DIRECT_CLIENT_DROP_RECOVERY_DELAY_MS);
+    }
+
+    private void cancelWifiDirectClientDropRecovery() {
+        wifiClientRecoveryGeneration++;
+    }
+
+    private void recreateGroupAfterClientDrop() {
+        if (!wifiDirectEnabled
+                || wifiGroupOperationInProgress
+                || wifiP2pManager == null
+                || wifiP2pChannel == null) {
+            return;
+        }
+        cancelWifiDirectClientDropRecovery();
+        wifiGroupOperationInProgress = true;
+        status("Recreating Wi-Fi Direct group after client drop");
+        try {
+            wifiP2pManager.removeGroup(wifiP2pChannel, new WifiP2pManager.ActionListener() {
+                @Override
+                public void onSuccess() {
+                    wifiGroupOperationInProgress = false;
+                    wifiGroupOwned = false;
+                    wifiGroupCreationAccepted = false;
+                    clearGroupInfo();
+                    status("Wi-Fi Direct group removed for client recovery");
+                    mainHandler.postDelayed(
+                            () -> reconnectRememberedNativePeerOrCreateGroup(false),
+                            500L);
+                }
+
+                @Override
+                public void onFailure(int reason) {
+                    wifiGroupOperationInProgress = false;
+                    status("Client recovery removeGroup rejected: " + p2pReason(reason));
+                    requestGroupInfo();
+                }
+            });
+        } catch (SecurityException ex) {
+            wifiGroupOperationInProgress = false;
+            status("Cannot recreate Wi-Fi Direct group; permission missing");
+        } catch (RuntimeException ex) {
+            wifiGroupOperationInProgress = false;
+            status("Cannot recreate Wi-Fi Direct group: " + ex.getMessage());
         }
     }
 
@@ -1029,6 +1522,7 @@ public class ProxyService extends Service {
         closeWifiProxyServer();
         wifiGroupOwned = false;
         wifiGroupCreationAccepted = false;
+        clearNativePeerNegotiationAcceptance();
         clearGroupInfo();
         status("Cannot use active Wi-Fi Direct group because PdaLink does not own it; left untouched");
         updateNotification();
@@ -1046,6 +1540,23 @@ public class ProxyService extends Service {
         getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
                 .edit()
                 .putString(PREF_WIFI_DIRECT_LEGACY_OWNED_SSID, ssid)
+                .apply();
+    }
+
+    private String loadRememberedNativePeerAddress() {
+        return WifiDirectPeerAddress.normalize(
+                valueOrEmpty(getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                        .getString(PREF_WIFI_DIRECT_NATIVE_PEER, "")));
+    }
+
+    private void rememberNativePeerAddress(String address) {
+        String normalized = WifiDirectPeerAddress.normalize(address);
+        if (normalized.isEmpty()) {
+            return;
+        }
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .edit()
+                .putString(PREF_WIFI_DIRECT_NATIVE_PEER, normalized)
                 .apply();
     }
 
@@ -1106,6 +1617,24 @@ public class ProxyService extends Service {
         updateNotification();
     }
 
+    private void broadcastStoppedStatus() {
+        String line = "All transports stopped";
+        recordStatusLine(line);
+        Log.i(TAG, line);
+        Intent intent = new Intent(ProxyActions.ACTION_STATUS);
+        intent.setPackage(getPackageName());
+        intent.putExtra(ProxyActions.EXTRA_STATUS, line);
+        putSnapshotExtras(intent);
+        sendBroadcast(intent);
+    }
+
+    private void broadcastSnapshot() {
+        Intent intent = new Intent(ProxyActions.ACTION_STATUS);
+        intent.setPackage(getPackageName());
+        putSnapshotExtras(intent);
+        sendBroadcast(intent);
+    }
+
     private void recordStatusLine(String line) {
         if (line.startsWith("CONNECT ") || line.matches("[A-Z]+ http://.*")) {
             lastRequest = line;
@@ -1142,6 +1671,9 @@ public class ProxyService extends Service {
         intent.putExtra(ProxyActions.EXTRA_GROUP_INTERFACE, groupInterface);
         intent.putExtra(ProxyActions.EXTRA_WIFI_GROUP_OWNED, wifiGroupOwned);
         intent.putExtra(ProxyActions.EXTRA_WIFI_GROUP_CLIENT_COUNT, wifiGroupClientCount);
+        intent.putExtra(
+                ProxyActions.EXTRA_WIFI_GROUP_CLIENT_ADDRESS,
+                wifiGroupClientAddress);
         intent.putExtra(ProxyActions.EXTRA_WIFI_TRANSPORT, wifiTransportLabel());
         intent.putExtra(ProxyActions.EXTRA_WIFI_SECURITY, wifiSecurity);
         intent.putExtra(ProxyActions.EXTRA_WIFI_BAND, requestedWifiBand);
@@ -1158,6 +1690,78 @@ public class ProxyService extends Service {
                 upstreamBytes(usbProxyServer) + upstreamBytes(wifiProxyServer));
         intent.putExtra(ProxyActions.EXTRA_TRAFFIC_DOWN_BYTES,
                 downstreamBytes(usbProxyServer) + downstreamBytes(wifiProxyServer));
+        putSessionSnapshotExtras(intent);
+    }
+
+    private void putSessionSnapshotExtras(Intent intent) {
+        List<ProxySessionSnapshot> allSessions = allSessionSnapshots();
+        List<ProxySessionSnapshot> sessions = selectSessionSnapshots(allSessions);
+        ArrayList<String> transports = new ArrayList<>(sessions.size());
+        ArrayList<String> clientAddresses = new ArrayList<>(sessions.size());
+        ArrayList<String> methods = new ArrayList<>(sessions.size());
+        ArrayList<String> destinations = new ArrayList<>(sessions.size());
+        long[] startedAt = new long[sessions.size()];
+        long[] endedAt = new long[sessions.size()];
+        long[] upBytes = new long[sessions.size()];
+        long[] downBytes = new long[sessions.size()];
+        for (int index = 0; index < sessions.size(); index++) {
+            ProxySessionSnapshot session = sessions.get(index);
+            transports.add(session.transport);
+            clientAddresses.add(session.clientAddress);
+            methods.add(session.method);
+            destinations.add(session.destination);
+            startedAt[index] = session.startedAtMillis;
+            endedAt[index] = session.endedAtMillis;
+            upBytes[index] = session.upstreamBytes;
+            downBytes[index] = session.downstreamBytes;
+        }
+        intent.putStringArrayListExtra(ProxyActions.EXTRA_SESSION_TRANSPORTS, transports);
+        intent.putStringArrayListExtra(ProxyActions.EXTRA_SESSION_CLIENT_ADDRESSES, clientAddresses);
+        intent.putStringArrayListExtra(ProxyActions.EXTRA_SESSION_METHODS, methods);
+        intent.putStringArrayListExtra(ProxyActions.EXTRA_SESSION_DESTINATIONS, destinations);
+        intent.putExtra(ProxyActions.EXTRA_SESSION_STARTED_AT, startedAt);
+        intent.putExtra(ProxyActions.EXTRA_SESSION_ENDED_AT, endedAt);
+        intent.putExtra(ProxyActions.EXTRA_SESSION_UP_BYTES, upBytes);
+        intent.putExtra(ProxyActions.EXTRA_SESSION_DOWN_BYTES, downBytes);
+        intent.putExtra(ProxyActions.EXTRA_SESSIONS_TRUNCATED,
+                allSessions.size() > sessions.size());
+    }
+
+    private List<ProxySessionSnapshot> allSessionSnapshots() {
+        List<ProxySessionSnapshot> sessions = new ArrayList<>();
+        addSessionSnapshots(sessions, usbProxyServer);
+        addSessionSnapshots(sessions, wifiProxyServer);
+        return sessions;
+    }
+
+    private List<ProxySessionSnapshot> selectSessionSnapshots(
+            List<ProxySessionSnapshot> allSessions) {
+        List<ProxySessionSnapshot> active = new ArrayList<>();
+        List<ProxySessionSnapshot> recent = new ArrayList<>();
+        for (ProxySessionSnapshot session : allSessions) {
+            (session.isActive() ? active : recent).add(session);
+        }
+        Comparator<ProxySessionSnapshot> activeOrder = (left, right) ->
+                Long.compare(right.startedAtMillis, left.startedAtMillis);
+        Comparator<ProxySessionSnapshot> recentOrder = (left, right) ->
+                Long.compare(right.endedAtMillis, left.endedAtMillis);
+        Collections.sort(active, activeOrder);
+        Collections.sort(recent, recentOrder);
+
+        List<ProxySessionSnapshot> result = new ArrayList<>();
+        int activeLimit = Math.min(active.size(), MAX_BROADCAST_SESSIONS);
+        result.addAll(active.subList(0, activeLimit));
+        int remaining = MAX_BROADCAST_SESSIONS - result.size();
+        int recentLimit = Math.min(recent.size(), Math.min(remaining, MAX_BROADCAST_RECENT_SESSIONS));
+        result.addAll(recent.subList(0, recentLimit));
+        return result;
+    }
+
+    private void addSessionSnapshots(List<ProxySessionSnapshot> sessions, HttpProxyServer server) {
+        if (server == null) {
+            return;
+        }
+        sessions.addAll(server.getSessionSnapshots());
     }
 
     private String proxySummary() {

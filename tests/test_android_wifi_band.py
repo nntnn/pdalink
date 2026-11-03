@@ -13,11 +13,13 @@ class AndroidWifiBandContractTest(unittest.TestCase):
         cls.actions = (JAVA / "ProxyActions.java").read_text(encoding="utf-8")
         cls.band = (JAVA / "WifiDirectBand.java").read_text(encoding="utf-8")
         cls.service = (JAVA / "ProxyService.java").read_text(encoding="utf-8")
+        cls.layout = (ROOT / "android/app/src/main/res/layout/activity_main.xml").read_text(encoding="utf-8")
+        cls.strings = (ROOT / "android/app/src/main/res/values/strings.xml").read_text(encoding="utf-8")
 
     def test_activity_exposes_all_band_choices_and_sends_selection(self):
-        self.assertIn('addWifiBandOption("Automatic"', self.activity)
-        self.assertIn('addWifiBandOption("2.4 GHz"', self.activity)
-        self.assertIn('addWifiBandOption("5 GHz"', self.activity)
+        self.assertIn('android:id="@+id/wifi_band_automatic"', self.layout)
+        self.assertIn('android:id="@+id/wifi_band_24"', self.layout)
+        self.assertIn('android:id="@+id/wifi_band_5"', self.layout)
         self.assertIn("intent.putExtra(ProxyActions.EXTRA_WIFI_BAND, selectedWifiBand)", self.activity)
         self.assertIn("WifiDirectBand.supportsSelection()", self.activity)
         self.assertNotIn("selectWifiBandInUi", self.activity)
@@ -48,13 +50,13 @@ class AndroidWifiBandContractTest(unittest.TestCase):
         self.assertIn("EXTRA_WIFI_BAND", self.actions)
         self.assertIn("EXTRA_WIFI_FREQUENCY_MHZ", self.actions)
         self.assertIn("group.getFrequency()", self.service)
-        self.assertIn('wifiBand = "requested " + WifiDirectBand.label(requestedBand)', self.activity)
-        self.assertIn("WifiDirectBand.frequencyLabel(frequencyMhz)", self.activity)
+        self.assertIn('band = "requested " + WifiDirectBand.label(state.requestedBand)', self.activity)
+        self.assertIn("WifiDirectBand.frequencyLabel(state.frequencyMhz)", self.activity)
 
     def test_pre_android_10_falls_back_to_automatic_only(self):
         self.assertIn("Build.VERSION.SDK_INT >= 29", self.band)
         self.assertIn("return supportsSelection() ? normalized : AUTO", self.band)
-        self.assertIn("supports Automatic band selection only", self.activity)
+        self.assertIn("Android 9 or earlier supports Automatic selection only.", self.strings)
 
 
 if __name__ == "__main__":

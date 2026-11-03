@@ -6,6 +6,8 @@ final class ProxyActions {
     static final String ACTION_STOP_USB = "dev.pdalink.prototype.STOP_USB";
     static final String ACTION_START_PRODUCT_USB = "dev.pdalink.prototype.START_PRODUCT_USB";
     static final String ACTION_START_WIFI_DIRECT = "dev.pdalink.prototype.START_WIFI_DIRECT";
+    static final String ACTION_INVITE_WIFI_DIRECT_PEER =
+            "dev.pdalink.prototype.INVITE_WIFI_DIRECT_PEER";
     static final String ACTION_STOP_WIFI_DIRECT = "dev.pdalink.prototype.STOP_WIFI_DIRECT";
     static final String ACTION_START_LOCAL_HOTSPOT = "dev.pdalink.prototype.START_LOCAL_HOTSPOT";
     static final String ACTION_STOP_LOCAL_HOTSPOT = "dev.pdalink.prototype.STOP_LOCAL_HOTSPOT";
@@ -27,10 +29,14 @@ final class ProxyActions {
     static final String EXTRA_GROUP_INTERFACE = "group_interface";
     static final String EXTRA_WIFI_GROUP_OWNED = "wifi_direct_group_owned";
     static final String EXTRA_WIFI_GROUP_CLIENT_COUNT = "wifi_direct_group_client_count";
+    static final String EXTRA_WIFI_GROUP_CLIENT_ADDRESS =
+            "wifi_direct_group_client_address";
     static final String EXTRA_WIFI_TRANSPORT = "wifi_transport";
     static final String EXTRA_WIFI_SECURITY = "wifi_security";
     static final String EXTRA_WIFI_BAND = "wifi_direct_band";
     static final String EXTRA_WIFI_FREQUENCY_MHZ = "wifi_direct_frequency_mhz";
+    static final String EXTRA_WIFI_P2P_PEER = "wifi_direct_p2p_peer";
+    static final String EXTRA_WIFI_P2P_RENEGOTIATE = "wifi_direct_p2p_renegotiate";
     static final String EXTRA_LINUX_TARGET = "linux_target";
     static final String EXTRA_USB_TARGET = "usb_target";
     static final String EXTRA_WIFI_TARGET = "wifi_target";
@@ -40,6 +46,15 @@ final class ProxyActions {
     static final String EXTRA_TRAFFIC_UP_BYTES = "traffic_up_bytes";
     static final String EXTRA_TRAFFIC_DOWN_BYTES = "traffic_down_bytes";
     static final String EXTRA_PRODUCT_USB_STATUS = "product_usb_status";
+    static final String EXTRA_SESSION_TRANSPORTS = "session_transports";
+    static final String EXTRA_SESSION_CLIENT_ADDRESSES = "session_client_addresses";
+    static final String EXTRA_SESSION_METHODS = "session_methods";
+    static final String EXTRA_SESSION_DESTINATIONS = "session_destinations";
+    static final String EXTRA_SESSION_STARTED_AT = "session_started_at";
+    static final String EXTRA_SESSION_ENDED_AT = "session_ended_at";
+    static final String EXTRA_SESSION_UP_BYTES = "session_up_bytes";
+    static final String EXTRA_SESSION_DOWN_BYTES = "session_down_bytes";
+    static final String EXTRA_SESSIONS_TRUNCATED = "sessions_truncated";
 
     static final String MODE_USB = "USB";
     static final String MODE_PRODUCT_USB = "Product USB";

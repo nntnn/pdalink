@@ -18,6 +18,8 @@ Usage:
   $0 usb stop [--local-port PORT] [--remote-port PORT] [--stop-android]
   $0 wifi {start-android|stop-android|local-hotspot|scan|connect|status|internet|probe|env|curl-test|test|smoke|doctor} [...]
   $0 connection status [--json] [connection-status options...]
+  $0 connection import [--uri URI|--image FILE|--camera] [--iface IFACE]
+  $0 client {run|install|status}
   $0 product-usb {status|check|aoa-start} [...]
   $0 status [--json]
   $0 device {scan|list|trust|untrust|set-default} [...]
@@ -77,7 +79,7 @@ wifi_usage() {
 Usage:
   $0 wifi start-android [--install APK]
   $0 wifi stop-android
-  $0 wifi local-hotspot sync [--mode auto|pinned] [--connect] [--reset-pin] [--start-android]
+  $0 wifi local-hotspot sync [--mode auto|pinned] [--connect] [--target SSH_ALIAS] [--reset-pin] [--start-android]
   $0 wifi scan
   $0 wifi connect [--ssid SSID] --password PASSWORD [--iface IFACE] [--ssid-pattern DIRECT-] [--host HOST] [--ports PORTS]
   $0 wifi status [--ssid-pattern DIRECT-] [--iface IFACE] [--host HOST] [--ports PORTS]
@@ -120,9 +122,13 @@ connection_usage() {
   cat <<EOF
 Usage:
   $0 connection status [--json] [--local-port PORT] [--remote-port PORT] [--route-target IP] [--curl-url URL]
+  $0 connection import [--uri URI|--image FILE|--camera] [--iface IFACE] [--no-connect]
 
 Shows whether Ubuntu internet is currently flowing through the PdaLink USB
 tunnel and pdalink0 route.
+
+Connection import reads the same QR shown by the Android host. URI input is
+also accepted on stdin so the Wi-Fi password does not appear in shell history.
 EOF
 }
 
@@ -162,7 +168,7 @@ run() {
       fi
       printf ' %q' "$arg"
       case "$arg" in
-        --password|wifi-sec.psk)
+        --password|wifi-sec.psk|--uri|--connection-uri)
           mask_next=1
           ;;
       esac
@@ -454,10 +460,13 @@ Usage:
   $0 config set KEY VALUE
 
 Keys:
-  auto_connect  off | on_trusted_connect | when_offline
-  route_mode    active_override | fallback_low_priority
-  dns_mode      resolved | off
-  notify        auto | off
+  auto_connect              off | on_trusted_connect | when_offline
+  local_hotspot_credentials off | auto | pinned
+  local_hotspot_join        off | if_disconnected | always
+  local_hotspot_target      off | SSH host/alias
+  route_mode                active_override | fallback_low_priority
+  dns_mode                  resolved | off
+  notify                    auto | off
 EOF
 }
 
@@ -482,6 +491,19 @@ Usage:
 EOF
 }
 
+client_usage() {
+  cat <<EOF
+Usage:
+  $0 client run
+  $0 client install
+  $0 client status
+
+Runs or installs the GTK4/libadwaita Ubuntu client. The client talks to the
+background watcher over the user session D-Bus and never runs route or ADB
+commands directly.
+EOF
+}
+
 systemd_user_dir() {
   local config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
   printf '%s\n' "$config_home/systemd/user"
@@ -489,6 +511,52 @@ systemd_user_dir() {
 
 pdalink_unit_path() {
   printf '%s\n' "$(systemd_user_dir)/pdalink-watch.service"
+}
+
+dbus_user_dir() {
+  local data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+  printf '%s\n' "$data_home/dbus-1/services"
+}
+
+pdalink_dbus_service_path() {
+  printf '%s\n' "$(dbus_user_dir)/dev.pdalink.Client1.service"
+}
+
+write_dbus_service() {
+  local dir service
+  dir="$(dbus_user_dir)"
+  service="$(pdalink_dbus_service_path)"
+  mkdir -p "$dir"
+  cat >"$service" <<EOF
+[D-BUS Service]
+Name=dev.pdalink.Client1
+Exec=/usr/bin/env bash $ROOT/tools/pdalink.sh watch run
+SystemdService=pdalink-watch.service
+EOF
+  chmod 0644 "$service"
+  echo "$service"
+}
+
+write_desktop_entry() {
+  local data_home applications entry
+  data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+  applications="$data_home/applications"
+  entry="$applications/dev.pdalink.Client.desktop"
+  mkdir -p "$applications"
+  cat >"$entry" <<EOF
+[Desktop Entry]
+Type=Application
+Name=PdaLink
+Comment=Connect Ubuntu internet through an Android phone
+Exec=/usr/bin/env bash $ROOT/tools/pdalink.sh client run
+Icon=network-vpn
+Terminal=false
+Categories=Network;System;
+StartupNotify=true
+DBusActivatable=false
+EOF
+  chmod 0644 "$entry"
+  echo "$entry"
 }
 
 require_systemctl_user() {
@@ -508,6 +576,7 @@ After=default.target
 [Service]
 Type=simple
 WorkingDirectory=$ROOT
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/usr/bin/env bash $ROOT/tools/pdalink.sh watch run
 Restart=always
 RestartSec=3
@@ -526,6 +595,7 @@ autostart_cmd() {
       require_systemctl_user
       local unit
       unit="$(write_autostart_unit)"
+      write_dbus_service >/dev/null
       log "Enabling PdaLink user service"
       run systemctl --user daemon-reload
       run systemctl --user enable --now "$(basename "$unit")"
@@ -545,6 +615,51 @@ autostart_cmd() {
       ;;
     *)
       autostart_usage >&2
+      exit 2
+      ;;
+  esac
+}
+
+client_cmd() {
+  local action="${1:-}"
+  case "$action" in
+    run)
+      exec python3 "$ROOT/linux/pdalink_client.py"
+      ;;
+    install)
+      local desktop dbus_service unit
+      desktop="$(write_desktop_entry)"
+      dbus_service="$(write_dbus_service)"
+      unit="$(write_autostart_unit)"
+      if command -v systemctl >/dev/null 2>&1; then
+        systemctl --user daemon-reload
+      fi
+      echo "client: installed"
+      echo "desktop-entry: $desktop"
+      echo "dbus-service: $dbus_service"
+      echo "systemd-unit: $unit"
+      echo "start: $0 client run"
+      ;;
+    status)
+      python3 - <<'PY'
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gtk
+print("GTK4/libadwaita: OK")
+PY
+      [[ -f "$(pdalink_dbus_service_path)" ]] \
+        && echo "D-Bus activation: INSTALLED" \
+        || echo "D-Bus activation: MISSING (run client install)"
+      [[ -f "${XDG_DATA_HOME:-$HOME/.local/share}/applications/dev.pdalink.Client.desktop" ]] \
+        && echo "desktop entry: INSTALLED" \
+        || echo "desktop entry: MISSING (run client install)"
+      ;;
+    -h|--help|"")
+      client_usage
+      ;;
+    *)
+      client_usage >&2
       exit 2
       ;;
   esac
@@ -683,6 +798,10 @@ main() {
       shift
       run "$ROOT/tools/install_linux.sh" "$@"
       ;;
+    client)
+      shift
+      client_cmd "$@"
+      ;;
     setup)
       shift
       if [[ "${1:-}" == "plan" ]]; then
@@ -804,6 +923,10 @@ main() {
         status)
           shift
           system_cmd connection-status "$@"
+          ;;
+        import)
+          shift
+          system_cmd connection-import "$@"
           ;;
         -h|--help|"")
           connection_usage
