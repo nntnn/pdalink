@@ -104,6 +104,23 @@ PdaLink is active, normal stop refuses to overwrite that newer setting; use
 the proxy without disconnecting a Direct connection created by the command.
 Non-GNOME desktops can continue to use `wifi env --probe`.
 
+For Linux IPv4 TCP/DNS system traffic, join the saved Direct profile and run:
+
+```bash
+./tools/pdalink.sh wifi tunnel start
+./tools/pdalink.sh wifi tunnel status
+./tools/pdalink.sh wifi tunnel stop
+```
+
+Refresh the installed root helper after updating this checkout. Non-loopback
+proxy sockets bind to the verified upstream interface, so a lost Wi-Fi route
+cannot send them back into the TUN. The watcher can optionally prefer healthy
+USB and fall back to Direct with `watch run --wifi-direct-failover` or
+`PDALINK_WIFI_DIRECT_FAILOVER=1`; this is off by default. Returning from Direct
+requires 20 seconds of continuous USB health and a 30 second Direct dwell.
+See [client device tests](docs/CLIENT_DEVICE_TESTS.md) for setup, transport
+selection, outage recovery, Windows Wintun, and Android Always-on VPN checks.
+
 Starting Wi-Fi Direct is additive: the Android USB proxy remains on
 `127.0.0.1:8000` for existing ADB forwards while the Direct proxy listens on
 `192.168.49.1:8001`. `wifi stop-android` removes only the Direct group and

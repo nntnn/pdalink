@@ -55,6 +55,48 @@ with an automatic WLAN profile. This provides reboot recovery for proxy-aware
 apps without a background PdaLink process. Experimental Wintun remains manual
 across client reboot and is not the supported connect-once entry point.
 
+## Optional Linux system tunnel
+
+QR import still prepares the saved local-only Wi-Fi link. It does not enable
+system routing. `./tools/pdalink.sh wifi tunnel start|stop|status` explicitly
+controls the shared IPv4 TCP/DNS tunnel lifecycle without USB. Update the
+installed root helper before using this path.
+
+The built-in Linux adapter resolves the non-loopback proxy's upstream device
+before creating the TUN or changing routes. Direct requires an on-link Wi-Fi
+source in `192.168.49.0/24`. Every TCP CONNECT, including DNS-over-TCP, binds
+with `SO_BINDTODEVICE`. Link/route removal therefore fails closed instead of
+using `pdalink0`. This avoids a host-route lifecycle and keeps route cleanup
+unchanged. Other remote proxies require a literal IPv4 endpoint and an existing
+upstream route; loopback USB remains unbound. The state records the selected
+device. An old remote-proxy state without binding is reported as UNBOUND.
+External adapters must supply their own equivalent loop protection.
+
+Watcher failover is explicitly opt-in with `--wifi-direct-failover` or
+`PDALINK_WIFI_DIRECT_FAILOVER=1`, alongside the existing
+`auto_connect=on_trusted_connect` policy. A trusted authorized USB device and
+working forwarded PAC take priority. If that path cannot be prepared/probed,
+the watcher accepts only a Wi-Fi Direct route and the canonical phone PAC.
+It never joins/replaces a WLAN itself. The already imported NetworkManager
+profile owns reconnection. The Direct PAC check is an identity sanity check,
+not cryptographic authentication.
+
+Return to USB requires 20 seconds of observed continuous health and 30 seconds
+since selecting Direct. Startup, restart and resume reset USB health evidence.
+An unavailable Direct link allows immediate recovery to healthy USB. Switching
+stops only a watcher-owned tunnel via the existing service/root helper, then
+starts the new proxy; failed cleanup prevents switching. Status and internet
+health report/probe the selected endpoint. Egress failure alone does not switch
+transports because both share the phone's cellular path. Existing TCP streams
+are not migrated. Root DNS policy and the active Tailscale compatibility hook
+apply equally to both transports.
+
+Windows retains its automatic WLAN profile and owned `/32` route. Wintun also
+constrains new proxy sockets with `IP_UNICAST_IF`, since a Wi-Fi outage may remove
+the `/32`; a changed physical adapter index needs explicit stop/start. No
+Windows reboot supervisor is added. Full manual acceptance criteria live in
+[CLIENT_DEVICE_TESTS.md](CLIENT_DEVICE_TESTS.md); hardware remains unverified.
+
 ## Verification
 
 All live network/phone/driver/service operations are deferred to manual testing.
