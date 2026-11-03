@@ -1622,8 +1622,13 @@ public class ProxyService extends Service {
         return WifiDirectCredentials.valid(ssid, passphrase);
     }
 
+    private final NotificationGate notificationGate = new NotificationGate();
+    private final Runnable notificationUpdate = () -> startForegroundCompat(buildNotificationText());
+
     private void updateNotification() {
-        startForegroundCompat(buildNotificationText());
+        // All service state and notification decisions are serialized on main.
+        mainHandler.removeCallbacks(notificationUpdate);
+        mainHandler.post(notificationUpdate);
     }
 
     private String buildNotificationText() {
@@ -1966,6 +1971,15 @@ public class ProxyService extends Service {
     }
 
     private void startForegroundCompat(String text) {
+        long now = android.os.SystemClock.elapsedRealtime();
+        long delay = notificationGate.delayMillis(text, now);
+        if (delay < 0) return;
+        if (delay > 0) {
+            mainHandler.removeCallbacks(notificationUpdate);
+            mainHandler.postDelayed(notificationUpdate, delay);
+            return;
+        }
+        notificationGate.didPost(text, now);
         Intent intent = new Intent(this, MainActivity.class);
         PendingIntent pendingIntent = PendingIntent.getActivity(
                 this,
