@@ -50,7 +50,7 @@ class FakeRunner:
         self.calls.append(list(command))
         if command == ["/adb", "devices", "-l"]:
             return pdalink_watch.CommandResult(0, self.devices, "")
-        if command == ["/adb", "forward", "--list"]:
+        if command == ["/adb", "-s", "R3CR406AAGE", "forward", "--list"]:
             return pdalink_watch.CommandResult(0, self.forwards, "")
         if command[:3] == ["/adb", "-s", "R3CR406AAGE"] and command[3:] == ["forward", "tcp:18080", "tcp:8000"]:
             self.forwards = "R3CR406AAGE tcp:18080 tcp:8000\n"
@@ -988,3 +988,30 @@ class PdaLinkWatchTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_two_phones_only_trusted_host_is_targeted(tmp_path):
+    config = PdaLinkWatchTest().make_config(tmp_path / "watch.json")
+    # Untrusted phone deliberately precedes the trusted host.
+    runner = FakeRunner("List of devices attached\nR39M202FZ7E device model:SM_G975N\n"
+                        "R3CR406AAGE device model:SM_G996N\n")
+    watcher = pdalink_watch.PdaLinkWatcher(config, runner=runner, probe=ok_probe, stdout=io.StringIO())
+    assert watcher.reconcile() == 0
+    assert watcher.state.device_serial == "R3CR406AAGE"
+    start = next(c for c in runner.calls if is_service_call(c, "start"))
+    assert start[start.index("--adb-serial") + 1] == "R3CR406AAGE"
+    assert watcher.reconcile() == 0
+    watcher.cleanup("stopped", watcher.previous_device())
+    for command in runner.calls:
+        if command[0] == "/adb" and command[1:] != ["devices", "-l"]:
+            assert command[1:3] == ["-s", "R3CR406AAGE"]
+
+def test_delegated_usb_start_keeps_selected_adb_serial():
+    lite = pdalink_watch.pdalink_lite
+    args = lite.build_parser().parse_args(['usb-start', '--adb-serial', 'R3CR406AAGE'])
+    with mock.patch.object(lite, 'adb_command', return_value=['/fake/adb']), \
+            mock.patch.object(lite, 'run_command', return_value=lite.CommandResult(0, '', '')) as command:
+        assert lite.usb_start(args) == 0
+        assert len(command.call_args_list) == 2
+        for call in command.call_args_list:
+            assert call.args[0][:3] == ['/fake/adb', '-s', 'R3CR406AAGE']

@@ -289,6 +289,7 @@ class PdaLinkWatcher:
         self.force_hotspot_start = False
         self.action_queue: queue.SimpleQueue[str] = queue.SimpleQueue()
         self.wake_event = threading.Event()
+        self.selected_serial = ""
         self.dbus_server = None
 
     def log(self, message: str) -> None:
@@ -480,7 +481,7 @@ class PdaLinkWatcher:
         return ""
 
     def forward_check(self, serial: str) -> ForwardCheck:
-        result = self.run_read(self.adb_command(["forward", "--list"]), timeout=5.0)
+        result = self.run_read(self.adb_command(["forward", "--list"], serial=serial), timeout=5.0)
         if result.returncode != 0:
             return ForwardCheck(False, False, (result.stderr or result.stdout).strip() or "adb forward --list failed")
 
@@ -555,6 +556,8 @@ class PdaLinkWatcher:
         args.extend(["--route-mode", user_config["route_mode"]])
         args.extend(["--dns-mode", user_config["dns_mode"]])
         args.extend(self.config.system_arg)
+        if command == "start" and self.selected_serial:
+            args.extend(["--adb-serial", self.selected_serial])
         if command == "start":
             if self.config.no_dns:
                 args.append("--no-dns")
@@ -927,6 +930,7 @@ class PdaLinkWatcher:
                 {"device": "missing", "forward": "stopped", "proxy": "stopped", "system": "stopped"},
             )
 
+        self.selected_serial = device.serial
         health = {"device": "ready", "forward": "checking", "proxy": "checking", "system": "checking"}
 
         preflight_forward = self.forward_check(device.serial)

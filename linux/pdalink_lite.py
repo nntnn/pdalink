@@ -1559,12 +1559,14 @@ def curl_test(args: argparse.Namespace) -> int:
 
 
 def usb_start(args: argparse.Namespace) -> int:
+    serial = getattr(args, "adb_serial", "")
     if args.start_android:
-        status = adb_start_android_proxy()
+        status = adb_start_android_proxy(serial) if serial else adb_start_android_proxy()
         if status != 0:
             return status
 
-    status = adb_forward_tcp(args.local_port, args.remote_port)
+    status = (adb_forward_tcp(args.local_port, args.remote_port, serial) if serial
+              else adb_forward_tcp(args.local_port, args.remote_port))
     if status != 0:
         return status
 
@@ -2043,6 +2045,7 @@ def system_start(args: argparse.Namespace) -> int:
 
     if args.start_usb:
         status = usb_start(argparse.Namespace(
+            adb_serial=getattr(args, "adb_serial", ""),
             local_port=proxy_url_port_or_default(config.proxy_url),
             remote_port=args.remote_port,
             start_android=args.start_android,
@@ -3063,8 +3066,9 @@ def adb_status(log_lines: int) -> None:
     print(logs or "(no matching PdaLink logs)")
 
 
-def adb_start_android_proxy() -> int:
-    result = adb_run([
+def adb_start_android_proxy(serial: str = "") -> int:
+    target = ["-s", serial] if serial else []
+    result = adb_run([*target,
         "shell",
         "am",
         "start-foreground-service",
@@ -3091,8 +3095,9 @@ def adb_stop_android_proxy() -> int:
     return result.returncode
 
 
-def adb_forward_tcp(local_port: int, remote_port: int) -> int:
-    result = adb_run(["forward", f"tcp:{local_port}", f"tcp:{remote_port}"], timeout=10.0)
+def adb_forward_tcp(local_port: int, remote_port: int, serial: str = "") -> int:
+    target = ["-s", serial] if serial else []
+    result = adb_run([*target, "forward", f"tcp:{local_port}", f"tcp:{remote_port}"], timeout=10.0)
     print_adb_result(result)
     if result.returncode == 0:
         print(f"adb forward tcp:{local_port} tcp:{remote_port}")
