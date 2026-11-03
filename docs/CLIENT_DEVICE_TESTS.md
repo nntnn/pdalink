@@ -197,7 +197,8 @@ empty native arguments: Windows PowerShell's legacy parser drops them; see
 4. Repeat Wi-Fi off/on and host Direct stop/start from step 2. During each
    outage run `status` and a bounded curl from step 3. Expected: requests fail
    without recursive CONNECTs or CPU/flow growth; Wintun process remains alive.
-   WLAN autoconnect restores the same physical interface; repeat `test` and curl
+   The backend supervisor explicitly reconnects the owned WLAN profile on the
+   same physical interface; repeat `test` and curl
    within 120 s. Existing streams can fail. If the adapter index changes (USB
    Wi-Fi adapter removal/replacement), explicitly stop/start; do not silently
    repin to an unverified route. Wintun does not supervise a Windows reboot.
@@ -212,7 +213,7 @@ empty native arguments: Windows PowerShell's legacy parser drops them; see
 
    Expected: inactive, owned Wintun process/routes/DNS gone, pre-existing routes
    intact, saved automatic WLAN profile retained by `-KeepWifi`. Normal stop
-   without that flag removes only its generated WLAN profile. If an owned
+   without that flag removes only its owned WLAN profile. If an owned
    process exited unexpectedly, status must say stale; use normal `stop` and
    inspect any retained-state error before retrying start. Never delete state
    or unrelated routes to make a test pass. Phase-1 PAC, rather than Wintun,
@@ -362,3 +363,63 @@ the old connection must not overwrite the new profile's pin. With multiple APs
 for the same SSID, confirm the strongest security-compatible scan is selected.
 If scans are empty/redacted, leave the app and reopen after the group is visible;
 the app reads cached OS scans and does not force scans or defeat OS throttling.
+
+## Round 3 Windows checks for Claude
+
+Use Windows 11 Pro / PowerShell 5.1 / Python 3.13 x64 again, including an elevated
+OpenSSH logon. Profile import uses `user=all` when elevated and `user=current`
+otherwise. The profile name is `PdaLink-SSID-<UTF-8 SSID hex>`; importing or
+starting with the same SSID updates that profile in place. Old GUID profiles
+are not bulk-deleted; normal cleanup still recognizes the old ownership format.
+
+The backend now launches through CIM `Win32_Process.Create`, outside the
+launcher's job object ([Microsoft job object documentation](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)).
+It opens its own protected runtime stdout/stderr logs. Its recovery thread calls
+the controller with bounded 5/10/20/40/60-second backoff (60-second cap). The
+controller uses `netsh wlan show networks` on the saved interface, connects only
+the owned profile when its exact SSID is visible, and verifies the saved physical
+index/alias and on-link subnet route before restoring a missing owned proxy /32.
+It never changes the backend's socket interface pin, takes over a conflicting
+/32, or recreates a pre-existing unowned /32. Start/stop/recovery share a mutex;
+cleanup persists `stopping` before deleting routes to suppress further recovery.
+
+1. Import/start twice with the same SSID and inspect `netsh wlan show profiles`:
+   one stable profile, no new GUID profile. Start from elevated SSH, end that
+   SSH session, reconnect over Ethernet and check `status`, PID/start time and
+   a fresh transparent request. Expect the same backend PID, active routes and
+   working request. Readiness errors remain in the saved stderr log.
+2. Repeat host Direct stop/start with Ethernet connected (Windows' minimize
+   simultaneous connections policy enabled). Observe disconnect then explicit
+   connection attempts, recovery within 120 seconds of SSID visibility, same
+   Wi-Fi index, restored `192.168.49.1/32`, and fresh requests through the host.
+   Repeat Wi-Fi off/on. Record WLAN events and elapsed time. A changed adapter
+   index must require explicit stop/start; no automatic repinning is allowed.
+3. Exercise stop with zero, one and several exact route matches, including
+   after an outage; expect no StrictMode `.Count` error. Cleanup failure must
+   retain state with recovery disabled. Retry stop after resolving the failure.
+4. Start immediately after association while DHCP is still installing routes.
+   Transient `Find-NetRoute` error 1232 must retry rather than abort immediately;
+   a genuinely absent route must still end in a bounded readiness failure.
+5. DHCP can install `0.0.0.0/0 via 192.168.49.1` on Wi-Fi. The group owner does
+   **no NAT**. This change leaves that DHCP default route and interface metric
+   unchanged: a winning Wi-Fi default can blackhole internet, especially on a
+   Wi-Fi-only client after `stop -KeepWifi`. Record defaults and metrics before,
+   during and after the test (`Get-NetRoute -DestinationPrefix '0.0.0.0/0'` and
+   `Get-NetIPInterface -AddressFamily IPv4`). Use normal stop and disconnect from
+   the Direct group to restore the usual uplink if affected. The tunnel's split
+   defaults carry supported traffic while active; do not use DHCP connectivity
+   as proof of tunnel success. Automatic metric/default-route management remains
+   outside this round (B7's documentation option).
+
+No Windows or Android device result is claimed by these changes.
+
+Round 3 offline verification: the requested Gradle tasks passed (14 client unit
+tests, 38 host unit tests, client debug APK assembled). The APK includes
+`libtun2proxy.so` for arm64-v8a, armeabi-v7a, x86 and x86_64 using the shared
+read-only native library path above. Full pytest: **304 passed, 8 skipped, 1
+known GTK dependency failure** (`test_linux_install_dry_run_prints_udev_rules`).
+PowerShell parser/runtime tests are skipped because this host has no PowerShell;
+the added empty/single/multiple route and transient-1232 tests must run on Windows.
+A subsequent focused Windows static/backend run passed all 45 selected tests.
+`git diff --check` passed. Recovery timing, CIM launcher survival and Android
+permission behavior still require the device checks above.
