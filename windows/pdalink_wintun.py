@@ -15,6 +15,8 @@ import json
 import os
 import signal
 import sys
+import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Protocol
@@ -339,8 +341,35 @@ def write_json_exclusive(path: Path, payload: dict[str, object]) -> None:
             pass
 
 
+def supervise_wifi(controller: Path, state_path: Path, token: str,
+                   stop_file: Path, stop_event: threading.Event) -> None:
+    """Bounded reconnect attempts; PowerShell validates saved ownership and index.
+
+    Runs in the detached backend, so an SSH logout does not end recovery.
+    The controller mutex serializes repair with start/stop.
+    """
+    delay = 5
+    while not stop_event.wait(delay) and not stop_file.exists():
+        try:
+            subprocess.run(
+                ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+                 "-ExecutionPolicy", "Bypass", "-File", str(controller), "recover",
+                 "-StatePath", str(state_path), "-RecoveryToken", token],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, timeout=45, check=False,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass  # Keep the packet engine pinned and retry; never select another NIC.
+        delay = min(60, delay * 2)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="PdaLink experimental Windows Wintun adapter")
+    parser.add_argument("--stdout-log", type=Path)
+    parser.add_argument("--stderr-log", type=Path)
+    parser.add_argument("--controller", type=Path)
+    parser.add_argument("--state-path", type=Path)
     parser.add_argument("--dll", required=True, type=Path)
     parser.add_argument("--dll-sha256", required=True)
     parser.add_argument("--adapter-name", required=True)
@@ -362,6 +391,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    # CIM launch has no inherited console/log handles.
+    if args.stdout_log:
+        sys.stdout = args.stdout_log.open("a", encoding="utf-8", buffering=1)
+    if args.stderr_log:
+        sys.stderr = args.stderr_log.open("a", encoding="utf-8", buffering=1)
+    if bool(args.controller) != bool(args.state_path):
+        raise ValueError("controller and state path must be supplied together")
     if not args.token or len(args.token) > 128:
         raise ValueError("controller token is missing or too long")
     if not 1 <= args.upstream_interface_index <= 0xFFFFFFFF:
@@ -402,6 +438,10 @@ def main(argv: list[str] | None = None) -> int:
                 "created_at": time.time(),
             },
         )
+        if args.controller:
+            threading.Thread(target=supervise_wifi, args=(
+                args.controller, args.state_path, args.token, args.stop_file, adapter.stop_event,
+            ), daemon=True, name="pdalink-wifi-recovery").start()
         adapter.run_windows(
             activation_file=args.activation_file,
             stop_file=args.stop_file,

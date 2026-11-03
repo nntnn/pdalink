@@ -38,6 +38,58 @@ if ($failed) { exit 1 }
         )
         self.assertEqual(result.returncode, 0, result.stdout)
 
+    def test_route_collections_keep_empty_single_and_multiple_shapes(self):
+        command = r"""
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$tokens = $null; $errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $PWD 'tools/windows_wifi_direct_tunnel.ps1'), [ref]$tokens, [ref]$errors)
+$definition = $ast.Find({ param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Get-ExactPdaLinkRoute'
+}, $true)
+Invoke-Expression $definition.Extent.Text
+function Get-NetRoute { $script:fakeRoutes }
+foreach ($count in @(0,1,2)) {
+    $script:fakeRoutes = @(for ($i = 0; $i -lt $count; $i++) {
+        [pscustomobject]@{ NextHop = '0.0.0.0'; RouteMetric = 5 }
+    })
+    $routes = Get-ExactPdaLinkRoute -Prefix '0.0.0.0/1' -InterfaceIndex 7 -NextHop '0.0.0.0'
+    if ($routes.Count -ne $count) { throw 'route collection shape changed' }
+    foreach ($route in $routes) {
+        if ($route.NextHop -ne '0.0.0.0') { throw 'nested route collection' }
+    }
+}
+"""
+        result = subprocess.run(
+            [POWERSHELL, "-NoLogo", "-NoProfile", "-Command", command], cwd=ROOT,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_route_readiness_retries_transient_1232(self):
+        command = r"""
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+. ./tools/windows_wifi_direct_common.ps1
+$script:attempts = 0
+function Start-Sleep { }
+function Find-NetRoute {
+    $script:attempts++
+    if ($script:attempts -lt 3) { throw 'Windows System Error 1232' }
+    [pscustomobject]@{ IPAddress = '192.168.49.2'; InterfaceIndex = 7 }
+    [pscustomobject]@{ DestinationPrefix = '192.168.49.0/24'; NextHop = '0.0.0.0'; InterfaceIndex = 7; InterfaceAlias = 'Wi-Fi' }
+}
+$route = Get-PdaLinkBestRoute -RemoteAddress '192.168.49.1'
+if ($script:attempts -ne 3 -or $route.interface_index -ne 7) { throw 'retry failed' }
+"""
+        result = subprocess.run(
+            [POWERSHELL, "-NoLogo", "-NoProfile", "-Command", command], cwd=ROOT,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+
     def test_connection_uri_parser_accepts_local_hotspot(self):
         command = r"""
 . ./tools/windows_wifi_direct_common.ps1

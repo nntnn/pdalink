@@ -32,7 +32,7 @@ class WindowsToolScriptTest(unittest.TestCase):
         self.assertIn('$authentication = if ($Security -eq "wpa3-sae")', common)
         self.assertIn('"authentication", $namespace, $authentication', common)
         self.assertIn('"encryption", $namespace, "AES"', common)
-        self.assertIn('"user=current"', common)
+        self.assertIn('"user=$scope"', common)
         self.assertIn("Remove-Item -LiteralPath $tempPath", common)
         self.assertIn("finally", common)
         self.assertIn("Find-NetRoute -RemoteIPAddress", common)
@@ -44,6 +44,51 @@ class WindowsToolScriptTest(unittest.TestCase):
         self.assertIn('$normalized -cne $expected', common)
         self.assertIn("PdaLink-WiFi-Direct-[0-9a-f]{32}", common)
         self.assertNotIn("Invoke-Expression", common)
+
+    def test_round3_profiles_are_stable_and_use_elevated_scope(self):
+        common = (ROOT / "tools/windows_wifi_direct_common.ps1").read_text()
+        self.assertIn('"all" } else { "current" }', common)  # B1
+        self.assertIn('IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)', common)
+        self.assertIn('$profileName = "PdaLink-SSID-$ssidKey"', common)  # B6
+        self.assertIn('UTF8.GetBytes($Ssid)', common)
+        self.assertIn('PdaLink-SSID-(?:[0-9a-f]{2}){1,32}', common)
+
+    def test_round3_native_probe_and_route_collection_contract(self):
+        script = (ROOT / "tools/windows_wifi_direct_tunnel.ps1").read_text()
+        self.assertIn("print(str(struct.calcsize('P') * 8) + ':' + platform.machine().lower())", script)  # B2
+        self.assertNotIn('calcsize(`"P`")', script)
+        self.assertIn('return ,@(Get-NetRoute', script)  # B3
+        self.assertNotIn('@(Get-ExactPdaLinkRoute', script)  # no nested arrays
+
+    def test_round3_detached_backend_and_reassociation(self):
+        script = (ROOT / "tools/windows_wifi_direct_tunnel.ps1").read_text()
+        backend = (ROOT / "windows/pdalink_wintun.py").read_text()
+        self.assertIn('Invoke-CimMethod -ClassName Win32_Process -MethodName Create', script)  # B4
+        self.assertNotIn('return Start-Process', script)
+        self.assertIn('sys.stderr = args.stderr_log.open', backend)
+        self.assertIn('import sys; print(sys.executable)', script)
+        self.assertIn('$candidate.executable = $resolvedPython', script)
+        self.assertIn('target=supervise_wifi', backend)  # B5
+        self.assertIn('delay = min(60, delay * 2)', backend)
+        self.assertIn('"recover"', backend)
+        self.assertIn('$state.token -cne $RecoveryToken', script)
+        self.assertIn('"interface=$($state.wifi_interface_alias)"', script)
+        self.assertIn('$_.ifIndex -eq [int]$state.wifi_interface_index', script)
+        self.assertIn('$hostRoutes.Count -eq 0 -and [bool]$state.host_route_created', script)
+        self.assertIn('if ($exact.Count -ne 1)', script)
+        self.assertIn('controllerMutex', script)
+        self.assertIn('[Guid]$Matches[1] -eq $InterfaceGuid', script)
+        self.assertIn('if ($status.state -eq "active" -and $associated)', script)
+        self.assertLess(script.index('$State.phase = "stopping"'), script.index('foreach ($prefix in @($State.split_routes))'))
+
+    def test_round3_route_readiness_retry_and_default_route_documentation(self):
+        common = (ROOT / "tools/windows_wifi_direct_common.ps1").read_text()
+        self.assertIn('$attempt -lt 10', common)  # B8, including Find-NetRoute error 1232
+        self.assertIn('if ($attempt -eq 9) { throw }', common)
+        self.assertIn('Start-Sleep -Milliseconds 500', common)
+        doc = (ROOT / "docs/CLIENT_DEVICE_TESTS.md").read_text()
+        for text in ('DHCP', '0.0.0.0/0', '192.168.49.1', 'metric', 'no NAT'):
+            self.assertIn(text, doc)  # B7 documentation option
 
     def test_direct_helpers_avoid_empty_native_arguments_on_windows_powershell(self):
         for name in ("windows_wifi_direct_internet.ps1", "windows_wifi_direct_tunnel.ps1"):
@@ -117,7 +162,7 @@ class WindowsToolScriptTest(unittest.TestCase):
     def test_windows_wifi_direct_tunnel_owns_routes_process_and_cleanup(self):
         script = (ROOT / "tools" / "windows_wifi_direct_tunnel.ps1").read_text()
 
-        self.assertIn('[ValidateSet("setup", "start", "stop", "status", "test")]', script)
+        self.assertIn('[ValidateSet("setup", "start", "stop", "status", "test", "recover")]', script)
         self.assertIn("[Security.SecureString]$Password", script)
         self.assertNotIn("[string]$Password", script)
         self.assertIn("Assert-Administrator", script)

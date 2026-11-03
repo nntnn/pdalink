@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("setup", "start", "stop", "status", "test")]
+    [ValidateSet("setup", "start", "stop", "status", "test", "recover")]
     [string]$Action = "start",
     [string]$Ssid = "",
     [Security.SecureString]$Password,
@@ -11,6 +11,7 @@ param(
     [string]$WintunManifest = "",
     [string[]]$DnsServers = @("1.1.1.1", "8.8.8.8"),
     [int]$Mtu = 1500,
+    [string]$RecoveryToken = "",
     [switch]$KeepWifi,
     [switch]$Force,
     [switch]$VerboseAdapter
@@ -236,7 +237,7 @@ function Get-PdaLinkPythonCommand {
             $minor = [int]$Matches[2]
             if ($major -gt 3 -or ($major -eq 3 -and $minor -ge 10)) {
                 $architectureOutput = @(& $candidate.executable @($candidate.prefix) -c `
-                    "import platform,struct; print(f'{struct.calcsize(`"P`") * 8}:{platform.machine().lower()}')" 2>&1)
+                    "import platform,struct; print(str(struct.calcsize('P') * 8) + ':' + platform.machine().lower())" 2>&1)
                 if ($LASTEXITCODE -ne 0) {
                     continue
                 }
@@ -250,6 +251,14 @@ function Get-PdaLinkPythonCommand {
                     default { $false }
                 }
                 if ($architectureMatches) {
+                    # Launch the actual interpreter, not py.exe's short-lived launcher:
+                    # the readiness PID must equal the detached process identity.
+                    $executableOutput = @(& $candidate.executable @($candidate.prefix) -c "import sys; print(sys.executable)" 2>&1)
+                    if ($LASTEXITCODE -ne 0 -or $executableOutput.Count -ne 1) { continue }
+                    $resolvedPython = ([string]$executableOutput[0]).Trim()
+                    if (-not (Test-Path -LiteralPath $resolvedPython -PathType Leaf)) { continue }
+                    $candidate.executable = $resolvedPython
+                    $candidate.prefix = @()
                     $candidate | Add-Member -NotePropertyName architecture -NotePropertyValue $nativeArchitecture
                     return $candidate
                 }
@@ -300,15 +309,21 @@ function Start-PdaLinkWintunProcess {
         "--stop-file", $StopFile,
         "--token", $Token,
         "--mtu", [string]$Mtu,
-        "--activation-timeout", "30"
+        "--activation-timeout", "30",
+        "--stdout-log", $StdoutLog, "--stderr-log", $StderrLog,
+        "--controller", $PSCommandPath, "--state-path", $StatePath
     )
     if ($VerboseAdapter) {
         $arguments += "--verbose"
     }
     $argumentLine = (@($arguments | ForEach-Object { ConvertTo-PdaLinkProcessArgument -Value ([string]$_) })) -join " "
-    return Start-Process -FilePath $PythonCommand.executable -ArgumentList $argumentLine `
-        -WorkingDirectory $Root -RedirectStandardOutput $StdoutLog -RedirectStandardError $StderrLog `
-        -WindowStyle Hidden -PassThru
+    # WMI provider creates the process outside an OpenSSH/session job object.
+    $commandLine = (ConvertTo-PdaLinkProcessArgument -Value $PythonCommand.executable) + " " + $argumentLine
+    $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+        CommandLine = $commandLine; CurrentDirectory = [string]$Root
+    }
+    if ([int]$created.ReturnValue -ne 0) { throw "detached Wintun launch failed: $($created.ReturnValue)" }
+    return Get-Process -Id ([int]$created.ProcessId) -ErrorAction Stop
 }
 
 function Wait-PdaLinkWintunReady {
@@ -433,7 +448,7 @@ function Assert-PdaLinkTunnelState {
     if ([int]$State.version -ne 1 -or [string]$State.owner -ne $StateOwner) {
         throw "invalid PdaLink tunnel state owner or version"
     }
-    if ([string]$State.phase -notin @("starting", "active")) {
+    if ([string]$State.phase -notin @("starting", "active", "stopping")) {
         throw "invalid PdaLink tunnel phase"
     }
     if ([string]$State.token -notmatch '^[0-9a-f]{32}$' -or
@@ -486,7 +501,7 @@ function Get-ExactPdaLinkRoute {
         [int]$ExpectedMetric = -1
     )
 
-    return @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix $Prefix -InterfaceIndex $InterfaceIndex `
+    return ,@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix $Prefix -InterfaceIndex $InterfaceIndex `
         -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Where-Object {
             [string]$_.NextHop -eq $NextHop -and ($ExpectedMetric -lt 0 -or [int]$_.RouteMetric -eq $ExpectedMetric)
         })
@@ -576,6 +591,9 @@ function Test-PdaLinkProcessIdentity {
 function Remove-PdaLinkTunnelOwnedState {
     param([Parameter(Mandatory = $true)][object]$State)
 
+    # Persist suppression before deletion; keep the packet adapter alive for cleanup.
+    $State.phase = "stopping"
+    Update-PdaLinkTunnelState -State $State
     $errors = [Collections.Generic.List[string]]::new()
     $ownedAdapters = @(Get-NetAdapter -Name ([string]$State.adapter_name) -ErrorAction SilentlyContinue)
     $adapterIdentityMatches = $ownedAdapters.Count -eq 1 -and
@@ -836,14 +854,21 @@ function Get-PdaLinkTunnelLifecycleStatus {
         if ($null -eq $process) {
             return [pscustomobject]@{ state = "stale"; detail = "owned Wintun process is not running"; payload = $state }
         }
+        if ($state.phase -eq "stopping") {
+            return [pscustomobject]@{ state = "drifted"; detail = "cleanup pending"; payload = $state }
+        }
+        $hostPin = Get-ExactPdaLinkRoute -Prefix $HostRoute -InterfaceIndex ([int]$state.wifi_interface_index) `
+            -NextHop ([string]$state.wifi_next_hop)
+        if ($hostPin.Count -ne 1) {
+            return [pscustomobject]@{ state = "drifted"; detail = "verified proxy /32 is missing"; payload = $state }
+        }
         $proxyRoute = Get-PdaLinkBestRoute -RemoteAddress $ProxyAddress
         if ([int]$proxyRoute.interface_index -ne [int]$state.wifi_interface_index) {
             return [pscustomobject]@{ state = "drifted"; detail = "Android proxy route left the verified Wi-Fi interface"; payload = $state }
         }
         foreach ($prefix in @($state.split_routes)) {
-            $route = @(Get-ExactPdaLinkRoute -Prefix ([string]$prefix) `
+            $route = Get-ExactPdaLinkRoute -Prefix ([string]$prefix) `
                 -InterfaceIndex ([int]$state.tunnel_interface_index) -NextHop "0.0.0.0" -ExpectedMetric $RouteMetric
-            )
             if ($route.Count -ne 1) {
                 return [pscustomobject]@{ state = "drifted"; detail = "owned route $prefix is missing or changed"; payload = $state }
             }
@@ -851,6 +876,69 @@ function Get-PdaLinkTunnelLifecycleStatus {
         return [pscustomobject]@{ state = "active"; detail = "process and exact routes verified"; payload = $state }
     } catch {
         return [pscustomobject]@{ state = "unreachable"; detail = $_.Exception.Message; payload = $state }
+    }
+}
+
+function Test-PdaLinkWifiAssociation {
+    param([Parameter(Mandatory = $true)][Guid]$InterfaceGuid,
+          [Parameter(Mandatory = $true)][string]$ExpectedSsid)
+
+    $lines = @(& netsh.exe wlan show interfaces)
+    if ($LASTEXITCODE -ne 0) { return $false }
+    $onSavedInterface = $false
+    foreach ($line in $lines) {
+        # GUID values identify each adapter independently of localized Name labels.
+        if ($line -match ':\s*\{?([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})\}?\s*$') {
+            $onSavedInterface = [Guid]$Matches[1] -eq $InterfaceGuid
+        } elseif ($onSavedInterface -and $line -match '^\s*SSID\s*:\s?(.*)$') {
+            return $Matches[1] -ceq $ExpectedSsid
+        }
+    }
+    return $false
+}
+
+function Repair-PdaLinkWifiAssociation {
+    $state = Read-PdaLinkTunnelState
+    if ($state.phase -ne "active" -or $state.token -cne $RecoveryToken -or
+        (Test-Path -LiteralPath $state.stop_file)) { return }
+    if ($null -eq (Test-PdaLinkProcessIdentity -State $state)) { return }
+    $wifi = @(Get-NetAdapter -IncludeHidden | Where-Object {
+        $_.ifIndex -eq [int]$state.wifi_interface_index -and $_.HardwareInterface -and
+        $_.Name -eq [string]$state.wifi_interface_alias
+    })
+    if ($wifi.Count -ne 1) { throw "saved physical Wi-Fi identity changed; stop/start required" }
+    $status = Get-PdaLinkTunnelLifecycleStatus
+    $associated = Test-PdaLinkWifiAssociation -InterfaceGuid $wifi[0].InterfaceGuid -ExpectedSsid $state.ssid
+    if ($status.state -eq "active" -and $associated) { return }
+    # SSID labels are defined by netsh; match the entire value, never a substring.
+    $visible = @(& netsh.exe wlan show networks "interface=$($state.wifi_interface_alias)")
+    if ($LASTEXITCODE -ne 0 -or -not ($visible | Where-Object {
+        $_ -match '^\s*SSID\s+\d+\s*:\s?(.*)$' -and $Matches[1] -ceq [string]$state.ssid
+    })) { return }
+    if (-not $associated) {
+        Invoke-PdaLinkNetsh -Arguments @("wlan", "connect", "name=$($state.profile_name)",
+            "interface=$($state.wifi_interface_alias)")
+        Start-Sleep -Seconds 2
+    }
+    if (-not (Test-PdaLinkWifiAssociation -InterfaceGuid $wifi[0].InterfaceGuid -ExpectedSsid $state.ssid)) { return }
+    # Require an on-link subnet route on the ORIGINAL index before repairing /32.
+    $onLink = @(Get-NetRoute -AddressFamily IPv4 -InterfaceIndex ([int]$state.wifi_interface_index) `
+        -DestinationPrefix "192.168.49.0/24" -PolicyStore ActiveStore -ErrorAction SilentlyContinue |
+        Where-Object { $_.NextHop -eq "0.0.0.0" })
+    if ($onLink.Count -ne 1) { return }
+    $hostRoutes = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix $HostRoute `
+        -PolicyStore ActiveStore -ErrorAction SilentlyContinue)
+    if ($hostRoutes.Count -eq 0 -and [bool]$state.host_route_created) {
+        New-NetRoute -AddressFamily IPv4 -DestinationPrefix $HostRoute `
+            -InterfaceIndex ([int]$state.wifi_interface_index) -NextHop ([string]$state.wifi_next_hop) `
+            -RouteMetric 1 -PolicyStore ActiveStore | Out-Null
+    }
+    $exact = Get-ExactPdaLinkRoute -Prefix $HostRoute -InterfaceIndex ([int]$state.wifi_interface_index) `
+        -NextHop ([string]$state.wifi_next_hop)
+    if ($exact.Count -ne 1) { throw "saved proxy /32 is missing or conflicted" }
+    $selected = Get-PdaLinkBestRoute -RemoteAddress $ProxyAddress
+    if ($selected.interface_index -ne [int]$state.wifi_interface_index) {
+        throw "recovery route left the saved interface"
     }
 }
 
@@ -889,12 +977,24 @@ function Stop-PdaLinkWifiDirectTunnel {
 
 Assert-Administrator
 Assert-PdaLinkRuntimePath -Path $StatePath
-switch ($Action) {
+# Serialize controller mutations so recovery cannot recreate a route during stop.
+$controllerMutex = [Threading.Mutex]::new($false, "Global\PdaLink-WifiDirect-Controller")
+$locked = $false
+try {
+    try { $locked = $controllerMutex.WaitOne(30000) } catch [Threading.AbandonedMutexException] { $locked = $true }
+    if (-not $locked) { throw "another PdaLink controller is busy" }
+    switch ($Action) {
     "setup" {
         & (Join-Path $PSScriptRoot "windows_wintun_setup.ps1") -Action install
     }
+    "recover" { Repair-PdaLinkWifiAssociation }
     "start" { Start-PdaLinkWifiDirectTunnel }
     "stop" { Stop-PdaLinkWifiDirectTunnel }
     "status" { Show-PdaLinkWifiDirectTunnelStatus }
     "test" { Test-PdaLinkWifiDirectTunnel }
+}
+
+} finally {
+    if ($locked) { $controllerMutex.ReleaseMutex() }
+    $controllerMutex.Dispose()
 }

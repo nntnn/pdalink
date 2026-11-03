@@ -1,15 +1,51 @@
 import hashlib
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "windows"))
 
 import pdalink_wintun
+
+
+class WifiSupervisorTest(unittest.TestCase):
+    def test_backoff_is_bounded_and_native_failures_do_not_end_recovery(self):
+        class StopEvent:
+            delays = []
+            def wait(self, delay):
+                self.delays.append(delay)
+                return len(self.delays) > 6
+
+        event = StopEvent()
+        with tempfile.TemporaryDirectory() as directory:
+            stop = Path(directory) / "stop"
+            with patch.object(pdalink_wintun.subprocess, "CREATE_NO_WINDOW", 0, create=True), patch.object(
+                pdalink_wintun.subprocess, "run",
+                side_effect=[OSError("offline"), subprocess.TimeoutExpired("fake", 45), None, None, None, None],
+            ) as run:
+                pdalink_wintun.supervise_wifi(Path("controller.ps1"), Path("state.json"), "owned-token", stop, event)
+        self.assertEqual(event.delays, [5, 10, 20, 40, 60, 60, 60])
+        self.assertEqual(run.call_count, 6)
+        for call in run.call_args_list:
+            self.assertEqual(call.args[0][-5:], ["recover", "-StatePath", "state.json", "-RecoveryToken", "owned-token"])
+            self.assertEqual(call.kwargs["timeout"], 45)
+
+    def test_stop_marker_prevents_native_recovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stop = Path(directory) / "stop"
+            stop.touch()
+            with patch.object(pdalink_wintun.subprocess, "run") as run:
+                from unittest.mock import Mock
+                event = Mock()
+                event.wait.return_value = False
+                pdalink_wintun.supervise_wifi(Path("controller.ps1"), Path("state.json"), "token", stop, event)
+                run.assert_not_called()
 
 
 class FakeWintunApi:
