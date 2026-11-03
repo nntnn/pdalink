@@ -589,9 +589,16 @@ def update_wifi_direct_profile_secret(ssid: str, password: str) -> bool:
     return ok
 
 
-def prepare_wifi_direct_profile(ssid: str, password: str | None, iface: str | None = None) -> str | None:
+def prepare_wifi_direct_profile(ssid: str, password: str | None, iface: str | None = None, *, autoconnect: bool = False) -> str | None:
     if shutil.which("nmcli") is None:
         return None
+    settings = list(WIFI_DIRECT_PROFILE_SETTINGS)
+    if autoconnect:
+        settings[1] = "yes"
+        settings[settings.index("ipv6.method") + 1] = "disabled"
+        settings.extend(("connection.autoconnect-retries", "0",
+                         "ipv6.never-default", "yes", "ipv6.ignore-auto-dns", "yes",
+                         "wifi-sec.psk-flags", "0"))
     profiles = wifi_connection_profiles_for_ssid(ssid)
     profile_name = profiles[0].name if profiles else WIFI_DIRECT_PROFILE_NAME
     existing_named = saved_nm_connection_named(profile_name)
@@ -607,21 +614,20 @@ def prepare_wifi_direct_profile(ssid: str, password: str | None, iface: str | No
             "ssid", ssid,
             "wifi-sec.key-mgmt", "wpa-psk",
             "wifi-sec.psk", password,
-            *WIFI_DIRECT_PROFILE_SETTINGS,
+            *settings,
         ]
     else:
         command = [
             "nmcli", "connection", "modify", profile_name,
             "802-11-wireless.ssid", ssid,
-            *WIFI_DIRECT_PROFILE_SETTINGS,
+            *settings,
         ]
         if password:
             command.extend(["wifi-sec.key-mgmt", "wpa-psk", "wifi-sec.psk", password])
 
     result = run_command(command, timeout=5.0)
     if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip() or f"nmcli exited {result.returncode}"
-        print(f"warning: could not prepare Wi-Fi Direct profile {profile_name!r}: {detail}", file=sys.stderr)
+        print("warning: could not prepare Wi-Fi Direct profile (check NetworkManager authorization)", file=sys.stderr)
         return None
     return profile_name
 
@@ -927,7 +933,7 @@ def connection_import(args: argparse.Namespace) -> int:
             args.iface,
         )
     else:
-        profile_name = prepare_wifi_direct_profile(bundle.ssid, bundle.password, args.iface)
+        profile_name = prepare_wifi_direct_profile(bundle.ssid, bundle.password, args.iface, autoconnect=True)
     if not profile_name:
         print("connection import failed: NetworkManager profile could not be prepared", file=sys.stderr)
         return 1
@@ -950,7 +956,28 @@ def connection_import(args: argparse.Namespace) -> int:
         status = run_nmcli(command)
         if status != 0:
             return status
-    return verify_after_connect(bundle.host, (bundle.port,), args.verify_timeout)
+    status = verify_after_connect(bundle.host, (bundle.port,), args.verify_timeout)
+    if status != 0 or not getattr(args, "internet", False):
+        return status
+    state_path = resolve_wifi_proxy_state_path(getattr(args, "state_file", ""))
+    try:
+        lock_fd = acquire_wifi_proxy_start_lock(state_path)
+        try:
+            pac_url = bundle.proxy_url + "/proxy.pac"
+            if state_path.exists():
+                state = load_wifi_proxy_state(state_path)
+                if state.get("pac_url") == pac_url and gnome_proxy_owned_by_pdalink(pac_url):
+                    return 0
+                raise RuntimeError("Existing proxy restore state must be stopped before another import")
+            enable_gnome_wifi_proxy(state_path=state_path, pac_url=pac_url, ssid=bundle.ssid,
+                                    profile_name=profile_name, disconnect_on_stop=False)
+        finally:
+            os.close(lock_fd)
+    except (RuntimeError, ValueError, SystemExit) as exc:
+        print(f"Wi-Fi imported; desktop proxy setup failed: {exc}", file=sys.stderr)
+        return 1
+    print("Persistent GNOME PAC enabled; NetworkManager will rejoin this Direct network.")
+    return 0
 
 
 def wifi_status(args: argparse.Namespace) -> int:
@@ -4254,6 +4281,8 @@ def build_parser() -> argparse.ArgumentParser:
     connection_import_parser.add_argument("--iface")
     connection_import_parser.add_argument("--verify-timeout", type=float, default=15.0)
     connection_import_parser.add_argument("--no-connect", action="store_true")
+    connection_import_parser.add_argument("--internet", action="store_true", help="persist GNOME PAC after verification")
+    connection_import_parser.add_argument("--state-file", default=os.getenv("PDALINK_WIFI_PROXY_STATE", ""))
     connection_import_parser.set_defaults(func=connection_import)
 
     probe_parser = sub.add_parser("probe", help="probe Android proxy PAC endpoint")

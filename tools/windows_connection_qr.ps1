@@ -1,6 +1,6 @@
 param(
     [ValidateSet("connect", "internet", "show")]
-    [string]$Action = "connect",
+    [string]$Action = "internet",
     [string]$ConnectionUri = "",
     [string]$Image = "",
     [switch]$Camera,

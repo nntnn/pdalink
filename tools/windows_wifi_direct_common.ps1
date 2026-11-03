@@ -197,7 +197,7 @@ function New-PdaLinkWifiProfile {
         $writer.WriteElementString("nonBroadcast", $namespace, "false")
         $writer.WriteEndElement()
         $writer.WriteElementString("connectionType", $namespace, "ESS")
-        $writer.WriteElementString("connectionMode", $namespace, "manual")
+        $writer.WriteElementString("connectionMode", $namespace, "auto")
         $writer.WriteElementString("autoSwitch", $namespace, "false")
         $writer.WriteStartElement("MSM", $namespace)
         $writer.WriteStartElement("security", $namespace)

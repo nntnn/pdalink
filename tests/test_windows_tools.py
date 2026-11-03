@@ -11,6 +11,7 @@ class WindowsToolScriptTest(unittest.TestCase):
     def test_windows_connection_qr_supports_clipboard_camera_and_dynamic_proxy(self):
         script = (ROOT / "tools" / "windows_connection_qr.ps1").read_text()
 
+        self.assertIn('[string]$Action = "internet"', script)
         self.assertIn("ConvertFrom-PdaLinkConnectionUri", script)
         self.assertIn("Get-Clipboard -Raw", script)
         self.assertIn('"--camera", [string]$CameraIndex', script)
@@ -26,7 +27,7 @@ class WindowsToolScriptTest(unittest.TestCase):
         self.assertIn("SecureStringToBSTR", common)
         self.assertIn("ZeroFreeBSTR", common)
         self.assertIn("[Xml.XmlWriter]::Create", common)
-        self.assertIn('"connectionMode", $namespace, "manual"', common)
+        self.assertIn('"connectionMode", $namespace, "auto"', common)
         self.assertIn('"autoSwitch", $namespace, "false"', common)
         self.assertIn('$authentication = if ($Security -eq "wpa3-sae")', common)
         self.assertIn('"authentication", $namespace, $authentication', common)
