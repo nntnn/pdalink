@@ -31,6 +31,7 @@ import java.nio.charset.StandardCharsets;
 public final class PdaLinkVpnService extends VpnService {
     public static final String ACTION_START = "dev.pdalink.client.START";
     public static final String ACTION_STOP = "dev.pdalink.client.STOP";
+    public static final String ACTION_QUERY = "dev.pdalink.client.QUERY";
     public static final String ACTION_STATUS = "dev.pdalink.client.STATUS";
     public static final String EXTRA_CONNECTION_URI = "connection_uri";
     public static final String EXTRA_STATE = "state";
@@ -53,6 +54,8 @@ public final class PdaLinkVpnService extends VpnService {
     private volatile boolean stopping;
     private int generation;
     private int retryAttempt;
+    private String lastState;
+    private String lastDetail = "";
     private final Runnable retry = () -> {
         if (stopping) return;
         if (nativeThread != null) {
@@ -73,6 +76,11 @@ public final class PdaLinkVpnService extends VpnService {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? "" : intent.getAction();
+        if (ACTION_QUERY.equals(action)) {
+            sendStatus(lastState == null ? getString(R.string.status_stopped) : lastState, lastDetail);
+            if (connection == null || stopping) stopSelf();
+            return connection != null && !stopping ? START_STICKY : START_NOT_STICKY;
+        }
         if (ACTION_STOP.equals(action)) {
             getSharedPreferences("vpn", MODE_PRIVATE).edit().putBoolean("enabled", false).commit();
             shutdown(getString(R.string.status_stopped), "");
@@ -83,8 +91,8 @@ public final class PdaLinkVpnService extends VpnService {
             stopSelf();
             return START_NOT_STICKY;
         }
-        if (networkCallback != null || vpnInterface != null) {
-            sendStatus(getString(R.string.status_error), getString(R.string.already_running));
+        if (!stopping && connection != null) {
+            sendStatus(lastState, lastDetail);
             return START_STICKY;
         }
         try {
@@ -179,20 +187,17 @@ public final class PdaLinkVpnService extends VpnService {
             connectionHandle.setConnectTimeout(8_000);
             connectionHandle.setReadTimeout(8_000);
             connectionHandle.setUseCaches(false);
+            connectionHandle.setInstanceFollowRedirects(false);
             int status = connectionHandle.getResponseCode();
             if (status != HttpURLConnection.HTTP_OK) {
                 throw new IOException("PAC HTTP status " + status);
             }
-            StringBuilder body = new StringBuilder();
+            String body;
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(
                     connectionHandle.getInputStream(), StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = reader.readLine()) != null && body.length() < 4096) {
-                    body.append(line).append('\n');
-                }
+                body = ProxyPacPolicy.read(reader);
             }
-            String expected = "PROXY " + connection.proxyHost + ":" + connection.proxyPort;
-            if (body.indexOf(expected) < 0) {
+            if (!ProxyPacPolicy.matches(body, connection.proxyHost, connection.proxyPort)) {
                 throw new IOException("PAC endpoint did not match the QR");
             }
         } catch (IOException exception) {
@@ -304,6 +309,8 @@ public final class PdaLinkVpnService extends VpnService {
     }
 
     private void sendStatus(String state, String detail) {
+        lastState = state;
+        lastDetail = detail;
         Intent status = new Intent(ACTION_STATUS)
                 .setPackage(getPackageName())
                 .putExtra(EXTRA_STATE, state)

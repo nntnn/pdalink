@@ -87,6 +87,10 @@ public class MainActivity extends Activity {
         } else {
             registerReceiver(statusReceiver, filter);
         }
+        // The VPN lives in its own process; query it after registering so reopening
+        // the activity retains the working Disconnect control during recovery.
+        startService(new Intent(this, PdaLinkVpnService.class)
+                .setAction(PdaLinkVpnService.ACTION_QUERY));
     }
 
     @Override
