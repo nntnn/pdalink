@@ -5,13 +5,18 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.net.ConnectivityManager;
 import android.net.Network;
+import android.net.MacAddress;
 import android.net.NetworkCapabilities;
 import android.net.NetworkRequest;
 import android.net.VpnService;
 import android.net.wifi.WifiNetworkSpecifier;
+import android.net.wifi.WifiInfo;
+import android.net.wifi.WifiManager;
+import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
@@ -30,6 +35,7 @@ import java.nio.charset.StandardCharsets;
 
 public final class PdaLinkVpnService extends VpnService {
     public static final String ACTION_START = "dev.pdalink.client.START";
+    public static final String ACTION_IMPORT = "dev.pdalink.client.IMPORT";
     public static final String ACTION_STOP = "dev.pdalink.client.STOP";
     public static final String ACTION_QUERY = "dev.pdalink.client.QUERY";
     public static final String ACTION_STATUS = "dev.pdalink.client.STATUS";
@@ -40,7 +46,6 @@ public final class PdaLinkVpnService extends VpnService {
     private static final String CHANNEL_ID = "pdalink-client-vpn";
     private static final int NOTIFICATION_ID = 41;
     private static final int MTU = 1500;
-    private static final int WIFI_TIMEOUT_MS = 60_000;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private ConnectivityManager connectivityManager;
@@ -54,6 +59,8 @@ public final class PdaLinkVpnService extends VpnService {
     private volatile boolean stopping;
     private int generation;
     private int retryAttempt;
+    private ReconnectPolicy reconnectPolicy = new ReconnectPolicy();
+    private String savedBssid;
     private String lastState;
     private String lastDetail = "";
     private final Runnable retry = () -> {
@@ -76,6 +83,15 @@ public final class PdaLinkVpnService extends VpnService {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? "" : intent.getAction();
+        if (ACTION_IMPORT.equals(action)) {
+            try {
+                saveProfile(PdaLinkConnectionUri.parse(intent.getStringExtra(EXTRA_CONNECTION_URI)));
+            } catch (IllegalArgumentException ignored) {
+                // An invalid import must not replace the saved profile.
+            }
+            if (connection == null || stopping) stopSelf();
+            return connection != null && !stopping ? START_STICKY : START_NOT_STICKY;
+        }
         if (ACTION_QUERY.equals(action)) {
             sendStatus(lastState == null ? getString(R.string.status_stopped) : lastState, lastDetail);
             if (connection == null || stopping) stopSelf();
@@ -91,14 +107,21 @@ public final class PdaLinkVpnService extends VpnService {
             stopSelf();
             return START_NOT_STICKY;
         }
-        if (!stopping && connection != null) {
-            sendStatus(lastState, lastDetail);
-            return START_STICKY;
-        }
         try {
             String raw = intent == null ? null : intent.getStringExtra(EXTRA_CONNECTION_URI);
             if (raw == null) raw = getSharedPreferences("vpn", MODE_PRIVATE).getString("profile", "");
-            connection = PdaLinkConnectionUri.parse(raw);
+            PdaLinkConnectionUri.Bundle requested = PdaLinkConnectionUri.parse(raw);
+            if (!stopping && connection != null && connection.toUri().equals(requested.toUri())) {
+                sendStatus(lastState, lastDetail);
+                return START_STICKY;
+            }
+            if (connection != null) releaseNetwork();
+            connection = requested;
+            saveProfile(connection);
+            savedBssid = ReconnectPolicy.normalizeBssid(
+                    getSharedPreferences("vpn", MODE_PRIVATE).getString("bssid", null));
+            reconnectPolicy = new ReconnectPolicy();
+            retryAttempt = 0;
             if (VpnService.prepare(this) != null) {
                 stopSelf(); // Approval must be requested by the visible activity.
                 return START_NOT_STICKY;
@@ -118,10 +141,57 @@ public final class PdaLinkVpnService extends VpnService {
         return START_STICKY;
     }
 
+    // Only the VPN process writes these preferences; imports arrive by Intent.
+    private void saveProfile(PdaLinkConnectionUri.Bundle profile) {
+        SharedPreferences prefs = getSharedPreferences("vpn", MODE_PRIVATE);
+        boolean sameCredentials = false;
+        try {
+            sameCredentials = ReconnectPolicy.sameWifiCredentials(profile,
+                    PdaLinkConnectionUri.parse(prefs.getString("profile", "")));
+        } catch (IllegalArgumentException ignored) {
+        }
+        SharedPreferences.Editor editor = prefs.edit().putString("profile", profile.toUri());
+        if (!sameCredentials) {
+            editor.remove("bssid");
+            savedBssid = null;
+            reconnectPolicy = new ReconnectPolicy();
+        }
+        editor.commit();
+    }
+
+    @SuppressWarnings("deprecation")
+    private void learnBssid(Network network, NetworkCapabilities capabilities) {
+        if (stopping || !network.equals(wifiNetwork)) return;
+        WifiInfo info = capabilities.getTransportInfo() instanceof WifiInfo
+                ? (WifiInfo) capabilities.getTransportInfo() : null;
+        if (info == null && Build.VERSION.SDK_INT < 31) {
+            // Android 10/11 expose the single STA connection via WifiManager instead.
+            WifiManager manager = getApplicationContext().getSystemService(WifiManager.class);
+            info = manager == null ? null : manager.getConnectionInfo();
+            if (info == null || !("\"" + connection.ssid + "\"").equals(info.getSSID())) return;
+        }
+        if (info == null) return;
+        String bssid = ReconnectPolicy.normalizeBssid(info.getBSSID());
+        if (bssid == null) return; // Missing permission/location services can redact this field.
+        // A new QR can be imported while the previous connection is still active.
+        SharedPreferences prefs = getSharedPreferences("vpn", MODE_PRIVATE);
+        try {
+            if (!ReconnectPolicy.sameWifiCredentials(connection,
+                    PdaLinkConnectionUri.parse(prefs.getString("profile", "")))) return;
+        } catch (IllegalArgumentException ignored) {
+            return;
+        }
+        savedBssid = bssid;
+        prefs.edit().putString("bssid", bssid).commit();
+    }
+
     private void requestWifiNetwork() {
+        if (stopping || networkCallback != null) return;
+        final String requestBssid = reconnectPolicy.requestBssid(savedBssid);
         final int requestGeneration = ++generation;
         WifiNetworkSpecifier.Builder wifi = new WifiNetworkSpecifier.Builder()
                 .setSsid(connection.ssid);
+        if (requestBssid != null) wifi.setBssid(MacAddress.fromString(requestBssid));
         if (PdaLinkConnectionUri.SECURITY_WPA3.equals(connection.security)) {
             wifi.setWpa3Passphrase(connection.password);
         } else {
@@ -132,34 +202,73 @@ public final class PdaLinkVpnService extends VpnService {
                 .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 .setNetworkSpecifier(wifi.build())
                 .build();
-        networkCallback = new ConnectivityManager.NetworkCallback() {
-            @Override
-            public void onAvailable(Network network) {
-                mainHandler.post(() -> {
-                    if (requestGeneration == generation) handleWifiAvailable(network);
-                });
-            }
-
-            @Override
-            public void onLost(Network network) {
-                mainHandler.post(() -> {
-                    if (requestGeneration == generation && network.equals(wifiNetwork) && !stopping) {
-                        reconnect(getString(R.string.wifi_lost));
-                    }
-                });
-            }
-
-            @Override
-            public void onUnavailable() {
-                mainHandler.post(() -> {
-                    if (requestGeneration == generation) reconnect(getString(R.string.wifi_unavailable));
-                });
-            }
-        };
+        networkCallback = Build.VERSION.SDK_INT >= 31
+                ? new WifiCallback(requestGeneration, requestBssid,
+                        ConnectivityManager.NetworkCallback.FLAG_INCLUDE_LOCATION_INFO)
+                : new WifiCallback(requestGeneration, requestBssid);
         try {
-            connectivityManager.requestNetwork(request, networkCallback, WIFI_TIMEOUT_MS);
+            int timeout = ReconnectPolicy.timeoutMillis(requestBssid);
+            if (timeout == 0) {
+                connectivityManager.requestNetwork(request, networkCallback);
+            } else {
+                connectivityManager.requestNetwork(request, networkCallback, timeout);
+            }
         } catch (RuntimeException exception) {
             shutdown(getString(R.string.status_error), getString(R.string.wifi_request_failed));
+        }
+    }
+
+    private final class WifiCallback extends ConnectivityManager.NetworkCallback {
+        private final int requestGeneration;
+        private final String requestBssid;
+
+        WifiCallback(int generation, String bssid) {
+            super();
+            requestGeneration = generation;
+            requestBssid = bssid;
+        }
+
+        WifiCallback(int generation, String bssid, int flags) {
+            super(flags); // API 31+: opt in to unredacted WifiInfo (permissions still apply).
+            requestGeneration = generation;
+            requestBssid = bssid;
+        }
+
+        @Override
+        public void onAvailable(Network network) {
+            mainHandler.post(() -> {
+                if (requestGeneration == generation) handleWifiAvailable(network);
+            });
+        }
+
+        @Override
+        public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) {
+            mainHandler.post(() -> {
+                if (requestGeneration == generation) learnBssid(network, capabilities);
+            });
+        }
+
+        @Override
+        public void onLost(Network network) {
+            mainHandler.post(() -> {
+                if (requestGeneration == generation && network.equals(wifiNetwork) && !stopping) {
+                    reconnect(getString(R.string.wifi_lost));
+                }
+            });
+        }
+
+        @Override
+        public void onUnavailable() {
+            mainHandler.post(() -> {
+                if (requestGeneration == generation && !stopping) {
+                    reconnectPolicy.onRequestFailure(requestBssid != null);
+                    if (requestBssid != null && reconnectPolicy.requestBssid(savedBssid) == null) {
+                        savedBssid = null;
+                        getSharedPreferences("vpn", MODE_PRIVATE).edit().remove("bssid").commit();
+                    }
+                    reconnect(getString(R.string.wifi_unavailable));
+                }
+            });
         }
     }
 
@@ -168,6 +277,7 @@ public final class PdaLinkVpnService extends VpnService {
             return;
         }
         wifiNetwork = network;
+        reconnectPolicy.onWifiAvailable();
         if (!connectivityManager.bindProcessToNetwork(network)) {
             shutdown(getString(R.string.status_error), getString(R.string.wifi_bind_failed));
             return;

@@ -74,7 +74,7 @@ public class MainActivity extends Activity {
         disconnectButton.setOnClickListener(view -> disconnect());
         renderStatus(getString(R.string.status_stopped), "");
         String saved = getPreferences(MODE_PRIVATE).getString("profile", "");
-        if (!saved.isEmpty()) parseConnection(saved);
+        if (!saved.isEmpty()) parseConnection(saved, false);
     }
 
     @Override
@@ -121,6 +121,10 @@ public class MainActivity extends Activity {
     }
 
     private void parseConnection(String raw) {
+        parseConnection(raw, true);
+    }
+
+    private void parseConnection(String raw, boolean imported) {
         try {
             connection = PdaLinkConnectionUri.parse(raw);
         } catch (IllegalArgumentException exception) {
@@ -128,6 +132,11 @@ public class MainActivity extends Activity {
             return;
         }
         getPreferences(MODE_PRIVATE).edit().putString("profile", connection.toUri()).commit();
+        if (imported) {
+            startService(new Intent(this, PdaLinkVpnService.class)
+                    .setAction(PdaLinkVpnService.ACTION_IMPORT)
+                    .putExtra(PdaLinkVpnService.EXTRA_CONNECTION_URI, connection.toUri()));
+        }
         connectionCodeView.setText("");
         connectionDetails.setVisibility(View.VISIBLE);
         networkView.setText(connection.ssid);
@@ -150,10 +159,10 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 33) {
             addIfMissing(missing, Manifest.permission.NEARBY_WIFI_DEVICES);
             addIfMissing(missing, Manifest.permission.POST_NOTIFICATIONS);
-        } else {
-            addIfMissing(missing, Manifest.permission.ACCESS_COARSE_LOCATION);
-            addIfMissing(missing, Manifest.permission.ACCESS_FINE_LOCATION);
         }
+        // Learning the AP BSSID requires location permission even on Android 13+.
+        addIfMissing(missing, Manifest.permission.ACCESS_COARSE_LOCATION);
+        addIfMissing(missing, Manifest.permission.ACCESS_FINE_LOCATION);
         if (!missing.isEmpty()) {
             requestPermissions(missing.toArray(new String[0]), REQUEST_PERMISSIONS);
             return;
