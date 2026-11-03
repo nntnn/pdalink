@@ -322,6 +322,7 @@ class SystemRouteConfig:
     route_metric: int = DEFAULT_ROUTE_METRIC
     dns_mode: str = DEFAULT_DNS_MODE
     dns_servers: tuple[str, ...] = DEFAULT_DNS_SERVERS
+    upstream_device: str = ""
 
 
 @dataclass(frozen=True)
@@ -1897,8 +1898,11 @@ def system_plan(args: argparse.Namespace) -> int:
         print(f"  ./tools/pdalink.sh usb start --no-start-android --local-port {proxy_port} --verify")
     else:
         print(f"  python3 linux/pdalink_lite.py probe --host {proxy_host} --ports {proxy_port}")
+        print("  # Requires a physical IPv4 route; Direct requires on-link Wi-Fi 192.168.49.0/24.")
+        print("  # TCP and DNS upstream sockets use SO_BINDTODEVICE; link loss fails closed.")
+        print("  # External adapters must provide equivalent upstream loop protection.")
     print()
-    print("2. Start the built-in USB internet adapter as root:")
+    print("2. Start the built-in internet adapter as root:")
     print_command(default_system_start_command(config))
     print("  # stop with Ctrl-C; cleanup removes PdaLink routes")
     print()
@@ -1933,6 +1937,22 @@ def system_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def proxy_upstream_device(config: SystemRouteConfig) -> str:
+    host, _ = proxy_host_port(config.proxy_url)
+    if host == "localhost" or ipaddress.ip_address(host).is_loopback:
+        return ""
+    address = ipaddress.ip_address(host)
+    if address.version != 4:
+        raise ValueError("non-loopback upstream requires a literal IPv4 proxy")
+    route = route_info(host)
+    if not route or not route.dev or route.dev == config.iface or route.dev == "lo":
+        raise ValueError("proxy requires a physical upstream route before TUN startup")
+    if host == DEFAULT_HOST and (route_warning(host, route) or
+                                not (Path("/sys/class/net") / route.dev / "wireless").exists()):
+        raise ValueError("Direct proxy requires an on-link Wi-Fi route on 192.168.49.0/24")
+    return route.dev
+
+
 def system_start(args: argparse.Namespace) -> int:
     try:
         config = system_config_from_args(args)
@@ -1946,6 +1966,10 @@ def system_start(args: argparse.Namespace) -> int:
         return 77
     if args.no_dns:
         config = replace(config, dns_mode="off")
+
+    if args.start_usb and proxy_host_port(config.proxy_url)[0] not in ("127.0.0.1", "localhost"):
+        print("--start-usb requires a loopback proxy", file=sys.stderr)
+        return 2
 
     if args.start_usb:
         status = usb_start(argparse.Namespace(
@@ -1970,6 +1994,7 @@ def system_start(args: argparse.Namespace) -> int:
     try:
         from pdalink_tun import TunHttpAdapter
 
+        config = replace(config, upstream_device=proxy_upstream_device(config))
         adapter = TunHttpAdapter.open(
             config.iface,
             config.proxy_url,
@@ -1982,6 +2007,9 @@ def system_start(args: argparse.Namespace) -> int:
     except (OSError, ValueError) as exc:
         print(f"failed to start built-in adapter: {exc}", file=sys.stderr)
         return 1
+
+    if config.upstream_device:
+        adapter.proxy.upstream_device = config.upstream_device
 
     dns_setup_commands = build_dns_setup_commands(config)
     if should_manage_dns(config) and not dns_setup_commands:
@@ -2037,6 +2065,7 @@ def system_adapter(args: argparse.Namespace) -> int:
     try:
         from pdalink_tun import TunHttpAdapter
 
+        config = replace(config, upstream_device=proxy_upstream_device(config))
         adapter = TunHttpAdapter.open(
             config.iface,
             config.proxy_url,
@@ -2049,6 +2078,8 @@ def system_adapter(args: argparse.Namespace) -> int:
     except (OSError, ValueError) as exc:
         print(f"failed to start built-in adapter: {exc}", file=sys.stderr)
         return 1
+    if config.upstream_device:
+        adapter.proxy.upstream_device = config.upstream_device
     print(f"adapter: running on {adapter.iface}, proxy {config.proxy_url}")
     try:
         adapter.run()
@@ -2295,6 +2326,7 @@ def write_system_state(path: Path, config: SystemRouteConfig) -> SystemRuntimeSt
         "mtu": config.mtu,
         "routes": list(config.routes),
         "proxy_url": config.proxy_url,
+        "upstream_device": config.upstream_device,
         "route_mode": config.route_mode,
         "route_metric": config.route_metric,
         "dns_mode": config.dns_mode,
@@ -2323,6 +2355,7 @@ def load_system_state(path: Path) -> SystemRuntimeState | None:
             mtu=validate_mtu(int(payload["mtu"])),
             routes=tuple(validate_cidr(str(route)) for route in payload["routes"]),
             proxy_url=str(payload["proxy_url"]),
+            upstream_device=str(payload.get("upstream_device", "")),
             route_mode=validate_route_mode(str(payload.get("route_mode") or DEFAULT_ROUTE_MODE)),
             route_metric=validate_route_metric(int(payload["route_metric"] if "route_metric" in payload else DEFAULT_ROUTE_METRIC)),
             dns_mode=validate_dns_mode(str(payload.get("dns_mode") or DEFAULT_DNS_MODE)),
@@ -2633,6 +2666,7 @@ def print_system_runtime_state(path: Path) -> None:
     print(f"state-pid: {state.pid}")
     print(f"state-started-at: {state.started_at}")
     print(f"state-proxy: {state.config.proxy_url}")
+    print(f"upstream-device: {state.config.upstream_device or 'loopback'}")
     if state.cmdline:
         runtime_binary = system_runtime_binary_from_cmdline(state.cmdline)
         print(f"state-cmdline: {state.cmdline}")
@@ -2701,7 +2735,7 @@ def system_next_steps(
     if not tun_access:
         steps.append(f"enable the Linux TUN device and permissions for {TUN_DEVICE}")
     if not proxy_ok:
-        steps.append("start the USB proxy first: ./tools/pdalink.sh usb start --verify")
+        steps.append("make the configured proxy reachable: " + config.proxy_url)
     if not adapter_ok:
         steps.append("provide a TUN-to-proxy packet adapter with --adapter-command")
     if not dns_ok:

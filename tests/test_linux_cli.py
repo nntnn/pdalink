@@ -2002,7 +2002,7 @@ class LinuxCliTest(unittest.TestCase):
             self.assertEqual(pdalink_lite.system_plan(args), 0)
         output = stdout.getvalue()
         self.assertIn("system-start", output)
-        self.assertIn("built-in USB internet adapter", output)
+        self.assertIn("built-in internet adapter", output)
 
     def test_system_status_reports_builtin_adapter(self):
         class FakeTun:

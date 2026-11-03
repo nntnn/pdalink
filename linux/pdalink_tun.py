@@ -217,9 +217,28 @@ class HttpConnectProxy:
         self.host = parsed.hostname
         self.port = parsed.port
         self.timeout = timeout
+        self.upstream_device = ""
+        self.upstream_interface_index = 0
 
     def connect(self, dst_host: str, dst_port: int) -> socket.socket:
-        sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
+        if self.upstream_device or self.upstream_interface_index:
+            # A device constraint survives route removal: never fall back to TUN.
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                sock.settimeout(self.timeout)
+                if self.upstream_device:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE,
+                                    self.upstream_device.encode("ascii") + b"\0")
+                else:
+                    # Windows IP_UNICAST_IF takes the interface index in network byte order.
+                    sock.setsockopt(socket.IPPROTO_IP, 31,
+                                    struct.pack("!I", self.upstream_interface_index))
+                sock.connect((self.host, self.port))
+            except BaseException:
+                sock.close()
+                raise
+        else:
+            sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
         sock.settimeout(self.timeout)
         target = f"{dst_host}:{dst_port}"
         request = (
