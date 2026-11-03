@@ -97,6 +97,7 @@ public class ProxyService extends Service {
     private String requestedWifiBand = WifiDirectBand.AUTO;
     private int groupFrequencyMhz;
     private int wifiGroupClientCount;
+    private String lastGroupInfoSummary = "";
     private String wifiGroupClientAddress = "";
     private boolean wifiGroupOwned;
     private boolean wifiGroupCreationAccepted;
@@ -1138,6 +1139,7 @@ public class ProxyService extends Service {
         groupFrequencyMhz = 0;
         wifiGroupClientCount = 0;
         wifiGroupClientAddress = "";
+        lastGroupInfoSummary = "";
     }
 
     private String valueOrEmpty(String value) {
@@ -1388,6 +1390,13 @@ public class ProxyService extends Service {
             return;
         }
         ensureWifiProxyServer();
+        String summary = groupSsid + "|" + groupInterface + "|" + groupFrequencyMhz + "|"
+                + wifiGroupClientCount + "|" + wifiGroupClientAddress + "|" + wifiTarget();
+        if (summary.equals(lastGroupInfoSummary)) {
+            // Periodic watchdog refresh with no change: keep the status log quiet.
+            return;
+        }
+        lastGroupInfoSummary = summary;
         status("Group SSID: " + groupSsid);
         status("Group password: available in app summary");
         status("Group interface: " + groupInterface);
