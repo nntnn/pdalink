@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_DIR = ROOT / ".tools" / "runtime"
 DEFAULT_STATE_FILE = RUNTIME_DIR / "pdalink-watch.json"
 DEFAULT_LOCAL_PORT = int(os.getenv("PDALINK_USB_LOCAL_PORT", "18080"))
+DIRECT_PROXY_URL = "http://192.168.49.1:8001"
 DEFAULT_REMOTE_PORT = int(os.getenv("PDALINK_USB_REMOTE_PORT", "8000"))
 ANDROID_DEBUG_ACTIVITY = "dev.pdalink.prototype/.DebugControlActivity"
 ANDROID_PROXY_SERVICE = "dev.pdalink.prototype/.ProxyService"
@@ -148,6 +149,9 @@ class WatchConfig:
     # runs never reach the network); the CLI enables them by default.
     internet_check_interval: float = 0.0
     internet_check_timeout: float = 6.0
+    wifi_direct_failover: bool = False
+    usb_return_delay: float = 20.0
+    transport_min_dwell: float = 30.0
 
     @property
     def effective_proxy_url(self) -> str:
@@ -274,6 +278,10 @@ class PdaLinkWatcher:
         self.boot_clock = boot_clock
         self.stdout = stdout
         self.state = WatchState.load(config.state_file)
+        self.active_proxy_url = (self.state.proxy_url if self.state.service_owned and self.state.proxy_url
+                                 else config.effective_proxy_url)
+        self.transport_since = self.boot_clock() if config.wifi_direct_failover else 0.0
+        self.usb_healthy_since: float | None = None
         self.local_hotspot_sync_after = 0.0
         self.local_hotspot_sync_failures = 0
         self.target_relay_after = 0.0
@@ -335,11 +343,12 @@ class PdaLinkWatcher:
         self.state.device_state = device.state if device else ""
         self.state.local_port = self.config.local_port
         self.state.remote_port = self.config.remote_port
-        self.state.proxy_url = self.config.effective_proxy_url
+        self.state.proxy_url = self.active_proxy_url
         self.state.last_error = error
         self.state.last_error_code = error_code
         if health is not None:
             self.state.health = dict(health)
+        self.state.health["transport"] = self.active_transport
         changed = before != self.state_signature()
         if not changed and not force:
             return False
@@ -541,7 +550,7 @@ class PdaLinkWatcher:
         user_config = self.user_config()
         args = shell_script_command(self.config.root / "tools" / "pdalink.sh")
         args.extend(["system", "service", command])
-        args.extend(["--proxy-url", self.config.effective_proxy_url])
+        args.extend(["--proxy-url", self.active_proxy_url])
         args.extend(["--route-mode", user_config["route_mode"]])
         args.extend(["--dns-mode", user_config["dns_mode"]])
         args.extend(self.config.system_arg)
@@ -738,7 +747,107 @@ class PdaLinkWatcher:
                 self.log(mode)
         return 1 if error else 0
 
+    @property
+    def active_transport(self) -> str:
+        if self.active_proxy_url == DIRECT_PROXY_URL:
+            return "wifi-direct"
+        return self.config.transport
+
+    def direct_ready(self) -> bool:
+        config = pdalink_lite.SystemRouteConfig(
+            "pdalink0", "10.66.0.2/24", 1500, (), DIRECT_PROXY_URL)
+        try:
+            pdalink_lite.proxy_upstream_device(config)
+        except (OSError, ValueError):
+            return False
+        # Bypass ambient desktop proxy settings and require the canonical PAC.
+        try:
+            pac = pdalink_lite.request_pac("192.168.49.1", 8001, timeout=2.0)
+        except OSError:
+            return False
+        expected = ('function FindProxyForURL(url, host) {\n'
+                    '  if (host == "192.168.49.1") return "DIRECT";\n'
+                    '  return "PROXY 192.168.49.1:8001; DIRECT";\n}')
+        return pac.replace("\r\n", "\n").rstrip("\n") == expected
+
+    def switch_proxy(self, target: str) -> bool:
+        if target == self.active_proxy_url:
+            return True
+        if not self.config.no_system_service:
+            check = self.service_check()
+            if check.running and not self.state.service_owned:
+                self.log("transport switch refused: service is not watcher-owned")
+                return False
+        self.stop_service()  # Uses the OLD URL for state ownership validation.
+        if self.state.service_owned:
+            self.log("transport switch refused: old service could not be stopped")
+            return False
+        self.active_proxy_url = target
+        self.transport_since = self.boot_clock()
+        self.reset_internet_check()
+        return True
+
     def reconcile(self) -> int:
+        if (not self.config.wifi_direct_failover or self.config.transport != "adb"
+                or self.user_config()["auto_connect"] != "on_trusted_connect"):
+            if (not self.config.wifi_direct_failover
+                    and not self.switch_proxy(self.config.effective_proxy_url)):
+                return 1
+            return self.reconcile_adb()
+        actions_ok, error = self.process_actions()
+        if not actions_ok:
+            return self.cleanup("control-failed", self.previous_device(), error,
+                                "control-failed", stop_android=False)
+        if self.user_config()["auto_connect"] != "on_trusted_connect":
+            return self.reconcile_adb()
+        usb_url = self.config.effective_proxy_url
+        devices, result = self.list_devices()
+        device = self.choose_device(devices) if result.returncode == 0 else None
+        usb_ok = False
+        if device is not None:
+            forward = self.forward_check(device.serial)
+            if not forward.conflict:
+                if not forward.ok or not self.probe(usb_url, 2.0).ok:
+                    started, _ = self.start_android(device)
+                    if started:
+                        forwarded, _ = self.ensure_forward(device)
+                        if forwarded and self.state.forward_owned:
+                            self.state.device_serial = device.serial
+                            self.state.local_port = self.config.local_port
+                            self.state.remote_port = self.config.remote_port
+                usb_ok = self.forward_check(device.serial).ok and self.probe(usb_url, 2.0).ok
+        now = self.boot_clock()
+        if not usb_ok:
+            self.usb_healthy_since = None
+        elif self.usb_healthy_since is None:
+            self.usb_healthy_since = now
+        on_direct = self.active_proxy_url == DIRECT_PROXY_URL
+        # USB is preferred initially; returning from Direct needs continuous health
+        # and a minimum dwell. Loss of Direct bypasses the dwell for recovery.
+        direct_ok = self.direct_ready() if on_direct or not usb_ok else False
+        return_usb = usb_ok and (not on_direct or not direct_ok or (
+            now - self.usb_healthy_since >= self.config.usb_return_delay
+            and now - self.transport_since >= self.config.transport_min_dwell))
+        target = usb_url if return_usb or not direct_ok else DIRECT_PROXY_URL
+        if not self.switch_proxy(target):
+            return 1
+        if target != DIRECT_PROXY_URL:
+            return self.reconcile_adb()
+        if device is None:
+            self.remove_forward(self.previous_device())
+        ok, error = self.start_service()
+        if not ok:
+            return self.cleanup("service-start-failed", device, error,
+                                "system-service-failed", stop_android=False)
+        health = {"proxy": "ready", "system": "ready", "usb": "ready" if usb_ok else "unavailable"}
+        internet = self.check_internet()
+        if internet:
+            health["internet"] = internet
+        if self.save_state("ready", device, health=health):
+            self.log("ready: wifi-direct -> " + self.active_proxy_url)
+        return 0
+
+    def reconcile_adb(self) -> int:
         if self.config.transport == "product-usb":
             return self.reconcile_product_usb()
 
@@ -830,7 +939,7 @@ class PdaLinkWatcher:
         if preflight_forward.ok:
             self.state.forward_owned = preflight_forward.owned
             health["forward"] = "ready"
-            proxy = self.probe(self.config.effective_proxy_url, self.config.verify_timeout)
+            proxy = self.probe(self.active_proxy_url, self.config.verify_timeout)
             if not proxy.ok:
                 ok, error = self.start_android(device)
                 if not ok:
@@ -852,7 +961,7 @@ class PdaLinkWatcher:
             health["forward"] = "ready"
 
         if proxy is None or not proxy.ok:
-            proxy = self.probe(self.config.effective_proxy_url, self.config.verify_timeout)
+            proxy = self.probe(self.active_proxy_url, self.config.verify_timeout)
         if not proxy.ok and preflight_forward.ok and self.state.forward_owned:
             self.remove_forward(device)
             ok, error = self.ensure_forward(device)
@@ -860,7 +969,7 @@ class PdaLinkWatcher:
                 health.update({"forward": "error", "proxy": "unreachable", "system": "stopped"})
                 return self.cleanup("forward-failed", device, error, "forward-repair-failed", health)
             health["forward"] = "repaired"
-            proxy = self.probe(self.config.effective_proxy_url, self.config.verify_timeout)
+            proxy = self.probe(self.active_proxy_url, self.config.verify_timeout)
         if not proxy.ok:
             health.update({"proxy": "unreachable", "system": "stopped"})
             return self.cleanup(
@@ -882,7 +991,7 @@ class PdaLinkWatcher:
             health["internet"] = internet
 
         if self.save_state("ready", device, health=health):
-            self.log(f"ready: {device.serial} -> {self.config.effective_proxy_url}")
+            self.log(f"ready: {device.serial} -> {self.active_proxy_url}")
         return 0
 
     def check_internet(self) -> str:
@@ -898,7 +1007,7 @@ class PdaLinkWatcher:
         wait = INTERNET_FAILING_RECHECK if self.internet_health == "failing" else interval
         if self.internet_checked_at is not None and now - self.internet_checked_at < wait:
             return self.internet_health
-        check = self.internet_probe(self.config.effective_proxy_url, self.config.internet_check_timeout)
+        check = self.internet_probe(self.active_proxy_url, self.config.internet_check_timeout)
         self.internet_checked_at = self.boot_clock()
         previous = self.internet_health
         if check.ok:
@@ -950,7 +1059,7 @@ class PdaLinkWatcher:
         if not product_status.ready:
             return self.cleanup_product_usb("waiting-product-usb", product_status.readiness)
 
-        proxy = self.probe(self.config.effective_proxy_url, self.config.verify_timeout)
+        proxy = self.probe(self.active_proxy_url, self.config.verify_timeout)
         if not proxy.ok:
             return self.cleanup_product_usb("proxy-unreachable", proxy.detail)
 
@@ -966,7 +1075,7 @@ class PdaLinkWatcher:
 
         self.state.forward_owned = False
         self.save_state("ready", None)
-        self.log(f"ready: product-usb -> {self.config.effective_proxy_url}")
+        self.log(f"ready: product-usb -> {self.active_proxy_url}")
         return 0
 
     def status(self) -> int:
@@ -975,9 +1084,10 @@ class PdaLinkWatcher:
 
         devices, result = self.list_devices()
         print("PdaLink watcher status", file=self.stdout)
+        print(f"transport: {self.state.health.get('transport', self.active_transport)}", file=self.stdout)
         print(pdalink_lite.ADB_TRANSPORT_LINE, file=self.stdout)
         print(f"state-file: {self.config.state_file}", file=self.stdout)
-        print(f"proxy: {self.config.effective_proxy_url}", file=self.stdout)
+        print(f"proxy: {self.active_proxy_url}", file=self.stdout)
         print(f"managed-forward: {'yes' if self.state.forward_owned else 'no'}", file=self.stdout)
         print(f"managed-service: {'yes' if self.state.service_owned else 'no'}", file=self.stdout)
         print(f"mode: {self.state.mode}", file=self.stdout)
@@ -987,8 +1097,12 @@ class PdaLinkWatcher:
             print(f"last-resume: {self.state.last_resume_at}", file=self.stdout)
         if result.returncode != 0:
             print(f"adb: FAIL {(result.stderr or result.stdout).strip()}", file=self.stdout)
-            return 1
+            if self.active_transport != "wifi-direct":
+                return 1
         device = self.choose_device(devices)
+        if self.active_transport == "wifi-direct":
+            proxy = self.probe(self.active_proxy_url, min(self.config.verify_timeout, 2.0))
+            print(f"proxy: {'OK' if proxy.ok else 'FAIL'} {proxy.detail}", file=self.stdout)
         if device:
             print(f"device: OK {device.serial}", file=self.stdout)
             forward = self.forward_check(device.serial)
@@ -996,7 +1110,7 @@ class PdaLinkWatcher:
                 print(f"forward: CONFLICT {forward.conflict}", file=self.stdout)
             else:
                 print(f"forward: {'OK' if forward.ok else 'MISSING'} tcp:{self.config.local_port} -> tcp:{self.config.remote_port}", file=self.stdout)
-            proxy = self.probe(self.config.effective_proxy_url, min(self.config.verify_timeout, 2.0))
+            proxy = self.probe(self.active_proxy_url, min(self.config.verify_timeout, 2.0))
             print(f"proxy: {'OK' if proxy.ok else 'FAIL'} {proxy.detail}", file=self.stdout)
         elif devices:
             states = ", ".join(f"{item.serial}:{item.state}" for item in devices)
@@ -1013,11 +1127,12 @@ class PdaLinkWatcher:
 
     def status_product_usb(self) -> int:
         print("PdaLink watcher status", file=self.stdout)
+        print(f"transport: {self.state.health.get('transport', self.active_transport)}", file=self.stdout)
         print(pdalink_lite.PRODUCT_USB_TRANSPORT_LINE, file=self.stdout)
         print(f"state-file: {self.config.state_file}", file=self.stdout)
         product_state_path = self.config.product_usb_state_file or pdalink_lite.default_product_usb_state_path()
         print(f"product-usb-state: {product_state_path}", file=self.stdout)
-        print(f"proxy: {self.config.effective_proxy_url}", file=self.stdout)
+        print(f"proxy: {self.active_proxy_url}", file=self.stdout)
         print(f"managed-service: {'yes' if self.state.service_owned else 'no'}", file=self.stdout)
         try:
             product_status = self.product_usb_status()
@@ -1089,6 +1204,8 @@ def raise_stop_requested(signum: int, _frame) -> None:
 
 
 def add_common_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--wifi-direct-failover", action="store_true",
+                        default=os.getenv("PDALINK_WIFI_DIRECT_FAILOVER", "0") == "1")
     parser.add_argument("--adb", default=default_adb_path())
     parser.add_argument("--transport", choices=("adb", "product-usb"), default=os.getenv("PDALINK_WATCH_TRANSPORT", "adb"))
     parser.add_argument("--local-port", type=int, default=DEFAULT_LOCAL_PORT)
@@ -1126,6 +1243,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
 def config_from_args(args: argparse.Namespace) -> WatchConfig:
     return WatchConfig(
         adb=args.adb,
+        wifi_direct_failover=args.wifi_direct_failover,
         transport=args.transport,
         local_port=args.local_port,
         remote_port=args.remote_port,

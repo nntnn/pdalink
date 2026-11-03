@@ -16,7 +16,7 @@ Usage:
   $0 usb status [--local-port PORT] [--remote-port PORT]
   $0 usb test [--install APK] [usb-smoke options...]
   $0 usb stop [--local-port PORT] [--remote-port PORT] [--stop-android]
-  $0 wifi {start-android|stop-android|local-hotspot|scan|connect|status|internet|probe|env|curl-test|test|smoke|doctor} [...]
+  $0 wifi {start-android|stop-android|local-hotspot|scan|connect|status|internet|tunnel|probe|env|curl-test|test|smoke|doctor} [...]
   $0 connection status [--json] [connection-status options...]
   $0 connection import [--uri URI|--image FILE|--camera] [--iface IFACE]
   $0 client {run|install|status}
@@ -83,6 +83,7 @@ Usage:
   $0 wifi scan
   $0 wifi connect [--ssid SSID] --password PASSWORD [--iface IFACE] [--ssid-pattern DIRECT-] [--host HOST] [--ports PORTS]
   $0 wifi status [--ssid-pattern DIRECT-] [--iface IFACE] [--host HOST] [--ports PORTS]
+  $0 wifi tunnel {start|stop|status} [system options...]
   $0 wifi internet start [--ssid SSID] --password PASSWORD [--iface IFACE] [--host HOST] [--ports PORTS] [--state-file PATH]
   $0 wifi internet status [--ssid-pattern DIRECT-] [--iface IFACE] [--host HOST] [--ports PORTS] [--state-file PATH]
   $0 wifi internet test [--url URL] [--host HOST] [--ports PORTS] [--state-file PATH]
@@ -1061,6 +1062,18 @@ main() {
         status)
           shift
           wifi_python_cmd wifi-status "$@"
+          ;;
+        tunnel)
+          shift
+          local action="${1:-status}"
+          [[ $# -eq 0 ]] || shift
+          case "$action" in
+            start|stop|status)
+              run bash "$ROOT/tools/pdalink_system_service.sh" "$action" \
+                --proxy-url http://192.168.49.1:8001 "$@"
+              ;;
+            *) fail "unknown wifi tunnel action: $action" ;;
+          esac
           ;;
         internet)
           shift
