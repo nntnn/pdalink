@@ -36,6 +36,7 @@ class WindowsToolScriptTest(unittest.TestCase):
         self.assertIn("Remove-Item -LiteralPath $tempPath", common)
         self.assertIn("finally", common)
         self.assertIn("Find-NetRoute -RemoteIPAddress", common)
+        self.assertIn("$_.HardwareInterface", common)
         self.assertIn("Assert-PdaLinkPrivateIpv4 -Address $ProxyAddress", common)
         self.assertIn('$route.next_hop -notin @("0.0.0.0", "")', common)
         self.assertIn('--noproxy "*"', common)
@@ -43,6 +44,14 @@ class WindowsToolScriptTest(unittest.TestCase):
         self.assertIn('$normalized -cne $expected', common)
         self.assertIn("PdaLink-WiFi-Direct-[0-9a-f]{32}", common)
         self.assertNotIn("Invoke-Expression", common)
+
+    def test_wintun_pins_upstream_interface_across_route_loss(self):
+        script = (ROOT / "tools/windows_wifi_direct_tunnel.ps1").read_text()
+        backend = (ROOT / "windows/pdalink_wintun.py").read_text()
+        self.assertIn('"--upstream-interface-index", [string]$UpstreamInterfaceIndex', script)
+        self.assertIn('-UpstreamInterfaceIndex ([int]$endpoint.route.interface_index)', script)
+        self.assertIn('adapter.proxy.upstream_interface_index = args.upstream_interface_index', backend)
+        self.assertIn('"--upstream-interface-index", type=int, required=True', backend)
 
     def test_windows_wifi_direct_phase1_is_transactional_and_drift_aware(self):
         script = (ROOT / "tools" / "windows_wifi_direct_internet.ps1").read_text()
@@ -249,11 +258,12 @@ class WindowsToolScriptTest(unittest.TestCase):
         wrapper = (ROOT / "tools" / "pdalink.sh").read_text()
 
         self.assertIn(
-            "wifi {start-android|stop-android|local-hotspot|scan|connect|status|internet|probe|env|curl-test|test|smoke|doctor}",
+            "wifi {start-android|stop-android|local-hotspot|scan|connect|status|internet|tunnel|probe|env|curl-test|test|smoke|doctor}",
             wrapper,
         )
         self.assertIn("wifi local-hotspot sync", wrapper)
         self.assertIn("local-hotspot-sync", wrapper)
+        self.assertIn("wifi tunnel {start|stop|status}", wrapper)
         self.assertIn("wifi internet start", wrapper)
         self.assertIn("wifi internet stop", wrapper)
         self.assertIn("wifi_usage", wrapper)

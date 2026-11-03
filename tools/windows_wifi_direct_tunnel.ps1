@@ -278,6 +278,7 @@ function Start-PdaLinkWintunProcess {
     param(
         [Parameter(Mandatory = $true)][object]$PythonCommand,
         [Parameter(Mandatory = $true)][object]$Wintun,
+        [Parameter(Mandatory = $true)][int]$UpstreamInterfaceIndex,
         [Parameter(Mandatory = $true)][string]$AdapterName,
         [Parameter(Mandatory = $true)][string]$Token,
         [Parameter(Mandatory = $true)][string]$ReadyFile,
@@ -293,6 +294,7 @@ function Start-PdaLinkWintunProcess {
         "--dll-sha256", [string]$Wintun.dll_sha256,
         "--adapter-name", $AdapterName,
         "--proxy-url", $ProxyUrl,
+        "--upstream-interface-index", [string]$UpstreamInterfaceIndex,
         "--ready-file", $ReadyFile,
         "--activation-file", $ActivationFile,
         "--stop-file", $StopFile,
@@ -737,6 +739,7 @@ function Start-PdaLinkWifiDirectTunnel {
 
         Write-PdaLinkStep "Starting verified Wintun packet adapter"
         $process = Start-PdaLinkWintunProcess -PythonCommand $pythonCommand -Wintun $wintun `
+            -UpstreamInterfaceIndex ([int]$endpoint.route.interface_index) `
             -AdapterName $adapterName -Token $token -ReadyFile $readyFile -ActivationFile $activationFile `
             -StopFile $stopFile -StdoutLog $stdoutLog -StderrLog $stderrLog
         [void](Wait-PdaLinkWintunReady -Process $process -ReadyFile $readyFile -Token $token `

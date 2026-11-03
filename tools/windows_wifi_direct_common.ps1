@@ -326,7 +326,12 @@ function Wait-PdaLinkWifiDirectRoute {
         try {
             $route = Get-PdaLinkBestRoute -RemoteAddress $ProxyAddress
             [void](Assert-PdaLinkPrivateIpv4 -Address $ProxyAddress)
-            if ($Interface -and $route.interface_alias -ne $Interface) {
+            $physical = @(Get-NetAdapter -IncludeHidden | Where-Object {
+                $_.ifIndex -eq $route.interface_index -and $_.HardwareInterface
+            })
+            if ($physical.Count -ne 1) {
+                $lastError = "proxy route is not on a physical adapter"
+            } elseif ($Interface -and $route.interface_alias -ne $Interface) {
                 $lastError = "selected interface $($route.interface_alias) is not requested interface $Interface"
             } elseif ($route.next_hop -notin @("0.0.0.0", "")) {
                 $lastError = "selected route uses unexpected next hop $($route.next_hop)"

@@ -164,6 +164,7 @@ class WindowsWintunTest(unittest.TestCase):
             "--dll", "wintun.dll",
             "--dll-sha256", "0" * 64,
             "--adapter-name", "PdaLink-Test",
+            "--upstream-interface-index", "17",
             "--ready-file", "ready.json",
             "--activation-file", "activate",
             "--stop-file", "stop",

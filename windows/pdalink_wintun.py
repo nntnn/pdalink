@@ -344,6 +344,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dll", required=True, type=Path)
     parser.add_argument("--dll-sha256", required=True)
     parser.add_argument("--adapter-name", required=True)
+    parser.add_argument("--upstream-interface-index", type=int, required=True)
     parser.add_argument("--proxy-url", default="http://192.168.49.1:8001")
     parser.add_argument("--ready-file", required=True, type=Path)
     parser.add_argument("--activation-file", required=True, type=Path)
@@ -363,6 +364,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if not args.token or len(args.token) > 128:
         raise ValueError("controller token is missing or too long")
+    if not 1 <= args.upstream_interface_index <= 0xFFFFFFFF:
+        raise ValueError("physical upstream interface index is required")
     dll_path = verify_dll(args.dll, args.dll_sha256)
     validate_ring_capacity(args.ring_capacity)
     api = WintunApi(dll_path)
@@ -376,6 +379,8 @@ def main(argv: list[str] | None = None) -> int:
         tcp_idle_timeout=args.tcp_idle_timeout,
         verbose=args.verbose,
     )
+
+    adapter.proxy.upstream_interface_index = args.upstream_interface_index
 
     def request_stop(_signum: int, _frame: object) -> None:
         adapter.stop_event.set()
