@@ -253,9 +253,16 @@ No ADB connection is needed for normal client operation.
    wrong endpoint/port or redirected PAC must not start the VPN. Leave the
    initial "Connect to device?" dialog open for more than 60 s before approving:
    it must remain the same request, without a minute-by-minute replacement.
-   After approval the service saves the connected BSSID with its private profile.
+   Keep the app open until Connected, or open it once after the first approved
+   connection. The visible activity selects the strongest scan result with the
+   saved SSID and compatible security; the VPN process validates the profile and
+   writes the normalized `bssid` to its `vpn` preferences. QR import also learns
+   the pin if the group is visible and precise location is already granted.
+   The service still tries connected WifiInfo opportunistically, but Android 12
+   on the S10+ redacts it without foreground location access. No background
+   location permission or location-type foreground service is added.
    A redacted `02:00:00:00:00:00`, malformed or missing BSSID must never be pinned;
-   fix location permission/settings and reconnect to learn a usable BSSID. With
+   fix location permission/settings and reopen the connected app to learn a usable BSSID. With
    redaction unresolved, SSID-only requests can still require approval.
 
 2. Turn off client mobile data and disconnect USB data. In a separate browser,
@@ -345,3 +352,13 @@ with 11 client tests and 38 host tests. Rebuilt with the shared read-only
 variable this worktree's default native library directory was empty. Pytest
 again reported 298 passed, 6 skipped and only the same known GTK dependency
 failure. No device reconnect or approval behavior was exercised here.
+
+Round 3 Android checks for Claude (S10+, SDK 31): with Location on and precise
+location granted, approve once, return to the foreground app and confirm only
+that `vpn.xml` contains a valid normalized `bssid` (do not dump the credentials).
+Repeat a short host outage without approval. Repeat QR import while the group
+is visible, then import changed credentials while the old VPN is connected:
+the old connection must not overwrite the new profile's pin. With multiple APs
+for the same SSID, confirm the strongest security-compatible scan is selected.
+If scans are empty/redacted, leave the app and reopen after the group is visible;
+the app reads cached OS scans and does not force scans or defeat OS throttling.

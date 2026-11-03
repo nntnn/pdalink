@@ -35,6 +35,7 @@ import java.nio.charset.StandardCharsets;
 
 public final class PdaLinkVpnService extends VpnService {
     public static final String ACTION_START = "dev.pdalink.client.START";
+    public static final String ACTION_LEARN_BSSID = "dev.pdalink.client.LEARN_BSSID";
     public static final String ACTION_IMPORT = "dev.pdalink.client.IMPORT";
     public static final String ACTION_STOP = "dev.pdalink.client.STOP";
     public static final String ACTION_QUERY = "dev.pdalink.client.QUERY";
@@ -83,6 +84,23 @@ public final class PdaLinkVpnService extends VpnService {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? "" : intent.getAction();
+        if (ACTION_LEARN_BSSID.equals(action)) {
+            try {
+                PdaLinkConnectionUri.Bundle scanned = PdaLinkConnectionUri.parse(
+                        intent.getStringExtra(EXTRA_CONNECTION_URI));
+                SharedPreferences prefs = getSharedPreferences("vpn", MODE_PRIVATE);
+                String pin = ReconnectPolicy.normalizeBssid(intent.getStringExtra("bssid"));
+                if (pin != null && ReconnectPolicy.sameWifiCredentials(scanned,
+                        PdaLinkConnectionUri.parse(prefs.getString("profile", "")))) {
+                    prefs.edit().putString("bssid", pin).commit();
+                    if (connection != null && ReconnectPolicy.sameWifiCredentials(scanned, connection)) {
+                        savedBssid = pin;
+                    }
+                }
+            } catch (IllegalArgumentException ignored) { }
+            if (connection == null || stopping) stopSelf();
+            return connection != null && !stopping ? START_STICKY : START_NOT_STICKY;
+        }
         if (ACTION_IMPORT.equals(action)) {
             try {
                 saveProfile(PdaLinkConnectionUri.parse(intent.getStringExtra(EXTRA_CONNECTION_URI)));
@@ -423,6 +441,7 @@ public final class PdaLinkVpnService extends VpnService {
         lastDetail = detail;
         Intent status = new Intent(ACTION_STATUS)
                 .setPackage(getPackageName())
+                .putExtra(EXTRA_CONNECTION_URI, connection == null ? "" : connection.toUri())
                 .putExtra(EXTRA_STATE, state)
                 .putExtra(EXTRA_DETAIL, detail == null ? "" : detail);
         sendBroadcast(status);

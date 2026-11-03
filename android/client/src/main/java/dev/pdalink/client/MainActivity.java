@@ -11,6 +11,8 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.net.VpnService;
+import android.net.wifi.WifiManager;
+import android.net.wifi.ScanResult;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.View;
@@ -48,6 +50,10 @@ public class MainActivity extends Activity {
             String state = intent.getStringExtra(PdaLinkVpnService.EXTRA_STATE);
             String detail = intent.getStringExtra(PdaLinkVpnService.EXTRA_DETAIL);
             renderStatus(state, detail);
+            if (getString(R.string.status_connected).equals(state) && connection != null
+                    && connection.toUri().equals(intent.getStringExtra(PdaLinkVpnService.EXTRA_CONNECTION_URI))) {
+                learnVisibleBssid();
+            }
         }
     };
 
@@ -137,6 +143,7 @@ public class MainActivity extends Activity {
                     .setAction(PdaLinkVpnService.ACTION_IMPORT)
                     .putExtra(PdaLinkVpnService.EXTRA_CONNECTION_URI, connection.toUri()));
         }
+        if (imported) learnVisibleBssid();
         connectionCodeView.setText("");
         connectionDetails.setVisibility(View.VISIBLE);
         networkView.setText(connection.ssid);
@@ -145,6 +152,30 @@ public class MainActivity extends Activity {
         connectButton.setEnabled(true);
         connectButton.setAlpha(1f);
         renderStatus(getString(R.string.status_ready), "");
+    }
+
+    // Read location-sensitive scans only from the visible activity. The service
+    // remains the sole prefs writer because it runs in a separate process.
+    @SuppressWarnings("deprecation")
+    private void learnVisibleBssid() {
+        if (connection == null || checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED) return;
+        try {
+            WifiManager wifi = getApplicationContext().getSystemService(WifiManager.class);
+            if (wifi == null) return;
+            List<BssidSelection.Candidate> candidates = new ArrayList<>();
+            for (ScanResult scan : wifi.getScanResults()) {
+                candidates.add(new BssidSelection.Candidate(scan.SSID, scan.BSSID,
+                        scan.capabilities, scan.level));
+            }
+            String bssid = BssidSelection.select(connection.ssid, connection.security, candidates);
+            if (bssid != null) startService(new Intent(this, PdaLinkVpnService.class)
+                    .setAction(PdaLinkVpnService.ACTION_LEARN_BSSID)
+                    .putExtra(PdaLinkVpnService.EXTRA_CONNECTION_URI, connection.toUri())
+                    .putExtra("bssid", bssid));
+        } catch (SecurityException ignored) {
+            // Location services or permission can be revoked while foregrounded.
+        }
     }
 
     private void connect() {
