@@ -18,7 +18,7 @@ import sys
 import time
 from typing import Callable, Iterable
 from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.request import ProxyHandler, build_opener, urlopen
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -143,6 +143,11 @@ class WatchConfig:
     config_file: Path | None = None
     product_usb_state_file: Path | None = None
     enable_dbus: bool = True
+    # Seconds between end-to-end internet checks through the proxy while the
+    # path is ready. 0 disables them (the library default, so tests and dry
+    # runs never reach the network); the CLI enables them by default.
+    internet_check_interval: float = 0.0
+    internet_check_timeout: float = 6.0
 
     @property
     def effective_proxy_url(self) -> str:
@@ -228,12 +233,32 @@ def probe_proxy(proxy_url: str, timeout: float) -> ProxyCheck:
         time.sleep(0.25)
 
 
+INTERNET_CHECK_URL = "http://connectivitycheck.gstatic.com/generate_204"
+INTERNET_FAILING_RECHECK = 15.0
+
+
+def probe_internet(proxy_url: str, timeout: float) -> ProxyCheck:
+    """Fetch a 204 endpoint through the PdaLink proxy to prove phone egress works."""
+    opener = build_opener(ProxyHandler({"http": proxy_url, "https": proxy_url}))
+    started = time.monotonic()
+    try:
+        with opener.open(INTERNET_CHECK_URL, timeout=max(0.5, timeout)) as response:
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            if response.status == 204:
+                return ProxyCheck(True, f"HTTP 204 in {elapsed_ms} ms")
+            return ProxyCheck(False, f"unexpected HTTP {response.status} in {elapsed_ms} ms")
+    except (OSError, URLError) as exc:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        return ProxyCheck(False, f"{exc} after {elapsed_ms} ms")
+
+
 class PdaLinkWatcher:
     def __init__(
         self,
         config: WatchConfig,
         runner: SubprocessRunner | None = None,
         probe: Callable[[str, float], ProxyCheck] = probe_proxy,
+        internet_probe: Callable[[str, float], ProxyCheck] = probe_internet,
         sleeper: Callable[[float], None] = time.sleep,
         boot_clock: Callable[[], float] = boottime,
         stdout = sys.stdout,
@@ -241,6 +266,10 @@ class PdaLinkWatcher:
         self.config = config
         self.runner = runner or SubprocessRunner()
         self.probe = probe
+        self.internet_probe = internet_probe
+        self.internet_checked_at: float | None = None
+        self.internet_health = ""
+        self.internet_failures = 0
         self.sleeper = sleeper
         self.boot_clock = boot_clock
         self.stdout = stdout
@@ -696,6 +725,7 @@ class PdaLinkWatcher:
         stop_android: bool = True,
         stop_device: pdalink_lite.AdbDevice | None = None,
     ) -> int:
+        self.reset_internet_check()
         self.stop_service()
         self.remove_forward(stop_device or device)
         if stop_android:
@@ -847,10 +877,47 @@ class PdaLinkWatcher:
         health["system"] = "ready"
 
         health.update(self.sync_local_hotspot_credentials(device, user_config))
+        internet = self.check_internet()
+        if internet:
+            health["internet"] = internet
 
         if self.save_state("ready", device, health=health):
             self.log(f"ready: {device.serial} -> {self.config.effective_proxy_url}")
         return 0
+
+    def check_internet(self) -> str:
+        """Return "ok"/"failing" for phone egress, re-probing on an interval.
+
+        A failing check is reported, not acted on: tearing down the USB path
+        because the phone's LTE is slow would make a flaky link worse.
+        """
+        interval = self.config.internet_check_interval
+        if interval <= 0:
+            return ""
+        now = self.boot_clock()
+        wait = INTERNET_FAILING_RECHECK if self.internet_health == "failing" else interval
+        if self.internet_checked_at is not None and now - self.internet_checked_at < wait:
+            return self.internet_health
+        check = self.internet_probe(self.config.effective_proxy_url, self.config.internet_check_timeout)
+        self.internet_checked_at = self.boot_clock()
+        previous = self.internet_health
+        if check.ok:
+            if previous == "failing":
+                self.log(f"internet: recovered after {self.internet_failures} failed check(s) ({check.detail})")
+            elif previous == "":
+                self.log(f"internet: ok ({check.detail})")
+            self.internet_failures = 0
+            self.internet_health = "ok"
+        else:
+            self.internet_failures += 1
+            self.log(f"internet: check {self.internet_failures} failed through proxy: {check.detail}")
+            self.internet_health = "failing"
+        return self.internet_health
+
+    def reset_internet_check(self) -> None:
+        self.internet_checked_at = None
+        self.internet_health = ""
+        self.internet_failures = 0
 
     def cleanup_product_usb(self, mode: str, error: str = "") -> int:
         self.stop_service()
@@ -1041,6 +1108,12 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--no-dbus", dest="enable_dbus", action="store_false")
     parser.add_argument("--no-dns", action="store_true")
     parser.add_argument("--tcp-idle-timeout", type=float, default=0.0)
+    parser.add_argument(
+        "--internet-check-interval",
+        type=float,
+        default=float(os.getenv("PDALINK_INTERNET_CHECK_INTERVAL", "60")),
+        help="seconds between end-to-end internet checks through the proxy while ready; 0 disables",
+    )
     parser.add_argument("--verbose-system", action="store_true")
     parser.add_argument(
         "--system-arg",
@@ -1071,6 +1144,7 @@ def config_from_args(args: argparse.Namespace) -> WatchConfig:
         enable_dbus=args.enable_dbus,
         no_dns=args.no_dns,
         tcp_idle_timeout=args.tcp_idle_timeout,
+        internet_check_interval=args.internet_check_interval,
         verbose_system=args.verbose_system,
         system_arg=tuple(args.system_arg),
     )

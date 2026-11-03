@@ -2910,6 +2910,59 @@ class LinuxCliTest(unittest.TestCase):
         self.assertEqual(parsed_udp.dst_port, 53000)
         self.assertEqual(parsed_udp.payload, b"dns-response")
 
+    def _tun_syn(self, dst: str, dst_port: int = 4000) -> bytes:
+        tcp = pdalink_tun.build_tcp_segment("10.66.0.2", dst, 45678, dst_port, 100, 0, pdalink_tun.TCP_SYN)
+        return pdalink_tun.build_ipv4_packet("10.66.0.2", dst, pdalink_tun.IP_PROTO_TCP, tcp)
+
+    def test_pdalink_tun_resets_private_destination_without_proxy_connect(self):
+        read_fd, write_fd = os.pipe()
+        adapter = pdalink_tun.TunHttpAdapter(write_fd, "pdalink0", "http://127.0.0.1:18080")
+        adapter.proxy = mock.Mock()
+
+        with mock.patch.object(pdalink_tun.threading, "Thread") as thread:
+            adapter.handle_packet(self._tun_syn("192.168.50.17"))
+
+        readable, _, _ = select.select([read_fd], [], [], 1)
+        self.assertTrue(readable)
+        reply = pdalink_tun.parse_ipv4_packet(os.read(read_fd, 4096))
+        reply_tcp = pdalink_tun.parse_tcp_segment(reply.payload)
+        adapter.close()
+        os.close(read_fd)
+
+        thread.assert_not_called()
+        adapter.proxy.connect.assert_not_called()
+        self.assertEqual(adapter.flows, {})
+        self.assertEqual(reply.src, "192.168.50.17")
+        self.assertEqual(reply.dst, "10.66.0.2")
+        self.assertEqual(reply_tcp.flags, pdalink_tun.TCP_RST | pdalink_tun.TCP_ACK)
+        self.assertEqual(reply_tcp.ack, 101)
+        self.assertEqual(adapter.tcp_anomalies["rejected_local_destination"], 1)
+
+    def test_pdalink_tun_classifies_local_only_destinations(self):
+        for address in ("10.1.2.3", "172.20.0.1", "192.168.50.1", "169.254.1.1", "127.0.0.1", "224.0.0.251"):
+            self.assertTrue(pdalink_tun.is_local_only_destination(address), address)
+        for address in ("1.1.1.1", "172.32.0.1", "100.101.197.100", "8.8.8.8"):
+            self.assertFalse(pdalink_tun.is_local_only_destination(address), address)
+
+    def test_pdalink_tun_resets_syn_when_pending_connect_limit_is_full(self):
+        read_fd, write_fd = os.pipe()
+        adapter = pdalink_tun.TunHttpAdapter(write_fd, "pdalink0", "http://127.0.0.1:18080")
+        for index in range(pdalink_tun.MAX_PENDING_TCP_CONNECTS):
+            adapter.flows[("10.66.0.2", 1000 + index, "1.1.1.1", 443)] = mock.Mock(connected=False, closed=False)
+
+        with mock.patch.object(pdalink_tun.threading, "Thread") as thread:
+            adapter.handle_packet(self._tun_syn("1.1.1.1", 443))
+
+        readable, _, _ = select.select([read_fd], [], [], 1)
+        self.assertTrue(readable)
+        os.read(read_fd, 4096)
+        adapter.flows.clear()
+        adapter.close()
+        os.close(read_fd)
+
+        thread.assert_not_called()
+        self.assertEqual(adapter.tcp_anomalies["rejected_pending_connect_limit"], 1)
+
     def test_pdalink_tun_drops_dns_when_inflight_limit_is_full(self):
         read_fd, write_fd = os.pipe()
         adapter = pdalink_tun.TunHttpAdapter(write_fd, "pdalink0", "http://127.0.0.1:18080", verbose=True)

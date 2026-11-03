@@ -1,3 +1,4 @@
+import dataclasses
 import io
 import json
 import sys
@@ -198,6 +199,67 @@ class PdaLinkWatchTest(unittest.TestCase):
             self.assertTrue(payload["forward_owned"])
             self.assertTrue(payload["service_owned"])
             self.assertEqual(payload["proxy_url"], "http://127.0.0.1:18080")
+
+    def test_ready_path_records_internet_health_without_tearing_down(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "watch.json"
+            config = dataclasses.replace(self.make_config(state_file), internet_check_interval=60.0)
+            clock = [1000.0]
+            sequence = SequenceProbe(
+                pdalink_watch.ProxyCheck(False, "timed out after 6000 ms"),
+                pdalink_watch.ProxyCheck(True, "HTTP 204 in 80 ms"),
+            )
+            calls = []
+
+            def internet(url, timeout):
+                calls.append(url)
+                return sequence(url, timeout)
+            stdout = io.StringIO()
+            watcher = pdalink_watch.PdaLinkWatcher(
+                config,
+                runner=FakeRunner(authorized_devices()),
+                probe=ok_probe,
+                internet_probe=internet,
+                boot_clock=lambda: clock[0],
+                stdout=stdout,
+            )
+
+            self.assertEqual(watcher.reconcile(), 0)
+            payload = json.loads(state_file.read_text(encoding="utf-8"))
+            self.assertEqual(payload["mode"], "ready")
+            self.assertEqual(payload["health"]["internet"], "failing")
+            self.assertEqual(payload["health"]["system"], "ready")
+
+            # Within the failing re-check window the probe is not repeated.
+            clock[0] += 5.0
+            watcher.reconcile()
+            self.assertEqual(calls, ["http://127.0.0.1:18080"])
+
+            clock[0] += pdalink_watch.INTERNET_FAILING_RECHECK
+            self.assertEqual(watcher.reconcile(), 0)
+            payload = json.loads(state_file.read_text(encoding="utf-8"))
+            self.assertEqual(payload["mode"], "ready")
+            self.assertEqual(payload["health"]["internet"], "ok")
+            self.assertIn("internet: recovered after 1 failed check(s)", stdout.getvalue())
+
+    def test_internet_check_is_disabled_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "watch.json"
+
+            def unexpected_probe(url, timeout):
+                raise AssertionError("internet probe must not run when disabled")
+
+            watcher = pdalink_watch.PdaLinkWatcher(
+                self.make_config(state_file),
+                runner=FakeRunner(authorized_devices()),
+                probe=ok_probe,
+                internet_probe=unexpected_probe,
+                stdout=io.StringIO(),
+            )
+
+            self.assertEqual(watcher.reconcile(), 0)
+            payload = json.loads(state_file.read_text(encoding="utf-8"))
+            self.assertNotIn("internet", payload["health"])
 
     def test_ready_path_syncs_active_local_hotspot_when_configured(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -436,7 +436,7 @@ class WindowsToolScriptTest(unittest.TestCase):
 
         self.assertNotIn("CONNECT_TUNNEL_TIMEOUT", proxy)
         self.assertNotIn("CONNECT tunnel timed out", proxy)
-        self.assertIn("done.await();", proxy)
+        self.assertIn("upstreamDone.await();", proxy)
         self.assertIn("shutdownOutput(remote)", proxy)
         self.assertIn("shutdownOutput(client)", proxy)
         self.assertIn("activeSockets", proxy)

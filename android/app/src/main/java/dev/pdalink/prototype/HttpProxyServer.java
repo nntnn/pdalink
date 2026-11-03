@@ -13,6 +13,7 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
@@ -25,6 +26,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -37,6 +40,19 @@ final class HttpProxyServer implements Closeable {
     private static final int MAX_HEADER_COUNT = 100;
     private static final long MAX_CONTENT_LENGTH = 16L * 1024L * 1024L;
     private static final int MAX_RECENT_SESSIONS = 20;
+    /**
+     * Upper bound on concurrently handled client connections per listener.
+     * Each CONNECT tunnel uses two threads, so this caps the proxy near
+     * 2 * MAX_ACTIVE_CLIENTS threads instead of growing without limit when a
+     * host floods it with connections.
+     */
+    static final int MAX_ACTIVE_CLIENTS = 192;
+    private static final long HALF_CLOSE_GRACE_MS = 30_000L;
+    private static final byte[] BUSY_RESPONSE = ("HTTP/1.1 503 Service Unavailable\r\n"
+            + "Content-Type: text/plain; charset=utf-8\r\n"
+            + "Content-Length: 25\r\n"
+            + "Connection: close\r\n\r\n"
+            + "PdaLink proxy is at limit").getBytes(StandardCharsets.ISO_8859_1);
 
     interface SocketFactory {
         Socket open(TargetHost host) throws IOException;
@@ -72,6 +88,8 @@ final class HttpProxyServer implements Closeable {
     private final ExecutorService executor = Executors.newCachedThreadPool();
     private final Set<Socket> activeSockets = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private final AtomicInteger activeClients = new AtomicInteger();
+    private final Semaphore clientSlots = new Semaphore(MAX_ACTIVE_CLIENTS);
+    private final AtomicLong rejectedBusy = new AtomicLong();
     private final AtomicLong upstreamBytes = new AtomicLong();
     private final AtomicLong downstreamBytes = new AtomicLong();
 
@@ -152,6 +170,10 @@ final class HttpProxyServer implements Closeable {
         return activeClients.get();
     }
 
+    long getRejectedBusyCount() {
+        return rejectedBusy.get();
+    }
+
     String getLastRequest() {
         return lastRequest;
     }
@@ -178,10 +200,21 @@ final class HttpProxyServer implements Closeable {
                     status("Rejected proxy client outside Wi-Fi Direct link: " + address);
                     continue;
                 }
+                if (!clientSlots.tryAcquire()) {
+                    rejectBusy(client);
+                    continue;
+                }
                 trackSocket(client);
                 try {
-                    executor.execute(() -> handleClient(client));
+                    executor.execute(() -> {
+                        try {
+                            handleClient(client);
+                        } finally {
+                            clientSlots.release();
+                        }
+                    });
                 } catch (RuntimeException ex) {
+                    clientSlots.release();
                     untrackSocket(client);
                     closeQuietly(client);
                     throw ex;
@@ -192,6 +225,38 @@ final class HttpProxyServer implements Closeable {
                 }
             }
         }
+    }
+
+    private void rejectBusy(Socket client) {
+        long rejected = rejectedBusy.incrementAndGet();
+        try {
+            // Small enough to fit the socket send buffer, so the accept thread never blocks here.
+            client.setSoLinger(true, 0);
+            OutputStream output = client.getOutputStream();
+            output.write(BUSY_RESPONSE);
+            output.flush();
+        } catch (IOException ignored) {
+        } finally {
+            closeQuietly(client);
+        }
+        if (rejected == 1 || rejected % 100 == 0) {
+            status("Proxy at " + MAX_ACTIVE_CLIENTS + " active connections; rejected " + rejected + " so far");
+        }
+    }
+
+    private Socket openRemote(TargetHost target, OutputStream clientOutput) throws IOException {
+        try {
+            return socketFactory.open(target);
+        } catch (DestinationPolicy.BlockedDestinationException ex) {
+            writeResponse(clientOutput, 403, "Forbidden", ex.getMessage() + "\n");
+        } catch (SocketTimeoutException ex) {
+            writeResponse(clientOutput, 504, "Gateway Timeout",
+                    "Timed out connecting to " + hostHeader(target.host, target.port) + "\n");
+        } catch (IOException ex) {
+            writeResponse(clientOutput, 502, "Bad Gateway",
+                    "Could not connect to " + hostHeader(target.host, target.port) + ": " + errorMessage(ex) + "\n");
+        }
+        return null;
     }
 
     private void handleClient(Socket client) {
@@ -296,7 +361,11 @@ final class HttpProxyServer implements Closeable {
             return;
         }
         status("CONNECT " + target.host + ":" + target.port);
-        try (Socket remote = socketFactory.open(target)) {
+        Socket opened = openRemote(target, clientOutput);
+        if (opened == null) {
+            return;
+        }
+        try (Socket remote = opened) {
             trackSocket(remote);
             try {
                 remote.setTcpNoDelay(true);
@@ -371,7 +440,11 @@ final class HttpProxyServer implements Closeable {
         }
 
         status(request.method + " http://" + host + ":" + remotePort + path);
-        try (Socket remote = socketFactory.open(new TargetHost(host, remotePort))) {
+        Socket opened = openRemote(new TargetHost(host, remotePort), clientOutput);
+        if (opened == null) {
+            return;
+        }
+        try (Socket remote = opened) {
             trackSocket(remote);
             try {
                 remote.setSoTimeout(REMOTE_SOCKET_TIMEOUT_MS);
@@ -413,7 +486,9 @@ final class HttpProxyServer implements Closeable {
             InputStream clientInput,
             OutputStream clientOutput,
             ProxySessionStore.SessionHandle session) throws IOException {
-        CountDownLatch done = new CountDownLatch(2);
+        // Upstream copies on a helper thread; downstream reuses the session
+        // thread, so each tunnel costs one extra thread instead of two.
+        CountDownLatch upstreamDone = new CountDownLatch(1);
         AtomicLong upstream = new AtomicLong();
         AtomicLong downstream = new AtomicLong();
         executor.execute(() -> {
@@ -423,21 +498,24 @@ final class HttpProxyServer implements Closeable {
             } catch (IOException ignored) {
             } finally {
                 shutdownOutput(remote);
-                done.countDown();
-            }
-        });
-        executor.execute(() -> {
-            try {
-                long copied = copy(remote.getInputStream(), clientOutput, session, false);
-                downstream.set(copied);
-            } catch (IOException ignored) {
-            } finally {
-                shutdownOutput(client);
-                done.countDown();
+                upstreamDone.countDown();
             }
         });
         try {
-            done.await();
+            long copied = copy(remote.getInputStream(), clientOutput, session, false);
+            downstream.set(copied);
+        } catch (IOException ignored) {
+        } finally {
+            shutdownOutput(client);
+        }
+        try {
+            // A client that never closes its side would otherwise pin this
+            // session (and its slot) forever after the remote has finished.
+            if (!upstreamDone.await(HALF_CLOSE_GRACE_MS, TimeUnit.MILLISECONDS)) {
+                closeQuietly(client);
+                closeQuietly(remote);
+                upstreamDone.await();
+            }
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
         } finally {

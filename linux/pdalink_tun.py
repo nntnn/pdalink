@@ -7,6 +7,7 @@ TCP streams and UDP/53 DNS queries. Other protocols are ignored.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import random
 import select
@@ -33,6 +34,34 @@ IP_PROTO_UDP = 17
 DNS_MAX_IN_FLIGHT = 64
 DNS_TCP_MAX_RESPONSE = 4096
 TCP_IDLE_TIMEOUT = 0.0
+MAX_TCP_FLOWS = 512
+MAX_PENDING_TCP_CONNECTS = 64
+
+# The phone relays internet traffic only. Destinations on local or private
+# networks can never be reached through the phone's cellular egress, so a SYN
+# for one is answered with an immediate reset instead of a proxy CONNECT that
+# would hold a phone-side socket until its connect timeout.
+LOCAL_ONLY_NETWORKS = tuple(
+    ipaddress.ip_network(cidr)
+    for cidr in (
+        "0.0.0.0/8",
+        "10.0.0.0/8",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "224.0.0.0/4",
+        "240.0.0.0/4",
+    )
+)
+
+
+def is_local_only_destination(address: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    return any(ip in network for network in LOCAL_ONLY_NETWORKS)
 
 TCP_FIN = 0x01
 TCP_SYN = 0x02
@@ -374,6 +403,13 @@ class TunHttpAdapter:
         flow = self.flows.get(key)
         if segment.flags & TCP_SYN and not segment.flags & TCP_ACK:
             if flow is None:
+                reject = self.syn_reject_reason(packet.dst)
+                if reject:
+                    self.record_tcp_anomaly(reject)
+                    if self.verbose:
+                        self.log(f"reject SYN {packet.dst}:{segment.dst_port}: {reject}")
+                    self.send_tcp_reset(packet, segment)
+                    return
                 flow = TcpFlow(self, key, packet, segment)
                 self.flows[key] = flow
                 flow.start()
@@ -382,6 +418,16 @@ class TunHttpAdapter:
             self.send_tcp_reset(packet, segment)
             return
         flow.handle(segment)
+
+    def syn_reject_reason(self, dst: str) -> str:
+        if is_local_only_destination(dst):
+            return "rejected_local_destination"
+        if len(self.flows) >= MAX_TCP_FLOWS:
+            return "rejected_flow_limit"
+        pending = sum(1 for flow in list(self.flows.values()) if not flow.connected and not flow.closed)
+        if pending >= MAX_PENDING_TCP_CONNECTS:
+            return "rejected_pending_connect_limit"
+        return ""
 
     def handle_udp(self, packet: IPv4Packet) -> None:
         try:
