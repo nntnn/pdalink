@@ -86,3 +86,13 @@ def test_usb_probe_failure_selects_direct_and_failed_stop_preserves_old_url(tmp_
     with mock.patch.object(w, 'stop_service'):  # Simulate failed root-helper cleanup.
         assert not w.switch_proxy(cfg.effective_proxy_url)
     assert w.active_proxy_url == watch.DIRECT_PROXY_URL
+
+def test_legacy_unbound_service_is_unhealthy_and_resume_resets_usb_hysteresis(tmp_path):
+    cfg = fixtures.PdaLinkWatchTest().make_config(tmp_path / 'watch.json')
+    w = watch.PdaLinkWatcher(cfg, runner=FakeRunner(''), stdout=io.StringIO())
+    with mock.patch.object(w, 'run_read', return_value=watch.CommandResult(0,
+            'wrapper: RUNNING\nstate-proxy: http://192.168.49.1:8001\nupstream-device: UNBOUND (legacy state; restart required)\n', '')):
+        assert not w.service_check().healthy
+    w.usb_healthy_since = 0.0
+    w.handle_resume()
+    assert w.usb_healthy_since is None

@@ -1478,14 +1478,21 @@ def request_pac(host: str, port: int, timeout: float = 3.0) -> str:
         ).encode("ascii")
         sock.sendall(request)
         chunks: list[bytes] = []
+        size = 0
         while True:
             data = sock.recv(8192)
             if not data:
                 break
+            size += len(data)
+            if size > 65536:
+                raise OSError("PAC response too large")
             chunks.append(data)
     raw = b"".join(chunks).decode("utf-8", errors="replace")
-    _, _, body = raw.partition("\r\n\r\n")
-    return body or raw
+    headers, separator, body = raw.partition("\r\n\r\n")
+    status = headers.split("\r\n", 1)[0].split()
+    if not separator or len(status) < 2 or status[0] not in ("HTTP/1.0", "HTTP/1.1") or status[1] != "200":
+        raise OSError("PAC endpoint did not return HTTP 200")
+    return body
 
 
 def probe_one(host: str, port: int) -> ProbeResult:
@@ -1894,7 +1901,7 @@ def system_plan(args: argparse.Namespace) -> int:
     print()
     print("1. Keep the Android HTTP proxy reachable:")
     proxy_host, proxy_port = proxy_host_port(config.proxy_url)
-    if proxy_host in ("127.0.0.1", "localhost"):
+    if proxy_uses_loopback(config.proxy_url):
         print(f"  ./tools/pdalink.sh usb start --no-start-android --local-port {proxy_port} --verify")
     else:
         print(f"  python3 linux/pdalink_lite.py probe --host {proxy_host} --ports {proxy_port}")
@@ -1937,9 +1944,19 @@ def system_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def proxy_uses_loopback(proxy_url: str) -> bool:
+    host, _ = proxy_host_port(proxy_url)
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def proxy_upstream_device(config: SystemRouteConfig) -> str:
     host, _ = proxy_host_port(config.proxy_url)
-    if host == "localhost" or ipaddress.ip_address(host).is_loopback:
+    if proxy_uses_loopback(config.proxy_url):
         return ""
     address = ipaddress.ip_address(host)
     if address.version != 4:
@@ -2039,6 +2056,7 @@ def system_start(args: argparse.Namespace) -> int:
     if getattr(args, "tailscale_compat", False):
         restart_active_tailscale_after_route_override(config)
     print(f"system internet: {config.iface} -> {config.proxy_url}")
+    print(f"upstream-device: {config.upstream_device or 'loopback'}")
     print(f"state: {state_path}")
     print("press Ctrl-C to stop and restore routes")
     cleanup_ok = True
@@ -2666,7 +2684,9 @@ def print_system_runtime_state(path: Path) -> None:
     print(f"state-pid: {state.pid}")
     print(f"state-started-at: {state.started_at}")
     print(f"state-proxy: {state.config.proxy_url}")
-    print(f"upstream-device: {state.config.upstream_device or 'loopback'}")
+    upstream = state.config.upstream_device or (
+        "loopback" if proxy_uses_loopback(state.config.proxy_url) else "UNBOUND (legacy state; restart required)")
+    print(f"upstream-device: {upstream}")
     if state.cmdline:
         runtime_binary = system_runtime_binary_from_cmdline(state.cmdline)
         print(f"state-cmdline: {state.cmdline}")

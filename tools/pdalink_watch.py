@@ -404,6 +404,7 @@ class PdaLinkWatcher:
                 return False, error
 
     def handle_resume(self) -> None:
+        self.usb_healthy_since = None  # Sleep is not evidence of continuous USB health.
         now = datetime.now(timezone.utc).isoformat()
         self.state.last_resume_at = now
         self.local_hotspot_sync_after = 0.0
@@ -569,7 +570,12 @@ class PdaLinkWatcher:
     def service_check(self) -> ServiceCheck:
         result = self.run_read(self.service_args("status"), timeout=10.0)
         running = "wrapper: RUNNING" in result.stdout
-        healthy = running and result.returncode == 0
+        saved_proxy = next((line.removeprefix("state-proxy: ").strip()
+                            for line in result.stdout.splitlines()
+                            if line.startswith("state-proxy: ")), "")
+        healthy = (running and result.returncode == 0
+                   and "upstream-device: UNBOUND" not in result.stdout
+                   and (not saved_proxy or saved_proxy == self.active_proxy_url))
         detail = safe_detail(result.stderr or result.stdout, "system service status unavailable")
         return ServiceCheck(running, healthy, detail)
 

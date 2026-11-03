@@ -87,3 +87,24 @@ def test_direct_system_start_binds_before_routes_and_preserves_dns_state(tmp_pat
         assert ['resolvectl', 'domain', 'pdalink0', '~.'] in commands
         tailscale.assert_called_once_with(saved[0])
     assert not (tmp_path / 'system.json').exists()
+
+def test_legacy_remote_state_does_not_claim_loopback_protection(tmp_path, capsys):
+    config = lite.SystemRouteConfig('pdalink0', '10.66.0.2/24', 1500, (), DIRECT_PROXY_URL)
+    path = tmp_path / 'legacy.json'
+    lite.write_system_state(path, config)
+    lite.print_system_runtime_state(path)
+    assert 'upstream-device: UNBOUND (legacy state; restart required)' in capsys.readouterr().out
+
+def test_pac_response_requires_http_success_and_is_bounded():
+    for response in (b'HTTP/1.1 503 Unavailable\r\n\r\nPROXY 192.168.49.1:8001;',
+                     b'x' * 65537):
+        sock = mock.MagicMock()
+        sock.__enter__.return_value = sock
+        sock.recv.side_effect = [response, b'']
+        with mock.patch.object(lite.socket, 'create_connection', return_value=sock):
+            try:
+                lite.request_pac('192.168.49.1', 8001)
+            except OSError:
+                pass
+            else:
+                raise AssertionError('invalid PAC response accepted')
