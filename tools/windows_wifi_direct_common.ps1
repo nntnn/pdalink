@@ -168,8 +168,10 @@ function New-PdaLinkWifiProfile {
     )
 
     Test-PdaLinkWifiCredential -Ssid $Ssid -Password $Password -Security $Security
-    $profileName = "PdaLink-WiFi-Direct-$([Guid]::NewGuid().ToString('N'))"
-    $tempPath = Join-Path ([IO.Path]::GetTempPath()) "$profileName.xml"
+    # Hex is a stable, collision-free encoding of the exact SSID, safe in filenames/netsh.
+    $ssidKey = [BitConverter]::ToString([Text.Encoding]::UTF8.GetBytes($Ssid)).Replace("-", "").ToLowerInvariant()
+    $profileName = "PdaLink-SSID-$ssidKey"
+    $tempPath = Join-Path ([IO.Path]::GetTempPath()) "$profileName-$([Guid]::NewGuid().ToString('N')).xml"
     $bstr = [IntPtr]::Zero
     $plainPassword = $null
     $writer = $null
@@ -220,7 +222,10 @@ function New-PdaLinkWifiProfile {
         $writer.Close()
         $writer = $null
 
-        $arguments = @("wlan", "add", "profile", "filename=$tempPath", "user=current")
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+        $scope = if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { "all" } else { "current" }
+        $arguments = @("wlan", "add", "profile", "filename=$tempPath", "user=$scope")
         if ($Interface) {
             $arguments += "interface=$Interface"
         }
@@ -278,7 +283,7 @@ function Remove-PdaLinkWifiProfile {
         [string]$Interface = ""
     )
 
-    if ($ProfileName -notmatch '^PdaLink-WiFi-Direct-[0-9a-f]{32}$') {
+    if ($ProfileName -notmatch '^(PdaLink-WiFi-Direct-[0-9a-f]{32}|PdaLink-SSID-(?:[0-9a-f]{2}){1,32})$') {
         throw "refusing to delete WLAN profile not owned by PdaLink: $ProfileName"
     }
     $arguments = @("wlan", "delete", "profile", "name=$ProfileName")
@@ -291,7 +296,17 @@ function Remove-PdaLinkWifiProfile {
 function Get-PdaLinkBestRoute {
     param([Parameter(Mandatory = $true)][string]$RemoteAddress)
 
-    $result = @(Find-NetRoute -RemoteIPAddress $RemoteAddress -ErrorAction Stop)
+    # DHCP/association can precede route installation (including error 1232).
+    $result = @()
+    for ($attempt = 0; $attempt -lt 10; $attempt++) {
+        try {
+            $result = @(Find-NetRoute -RemoteIPAddress $RemoteAddress -ErrorAction Stop)
+            break
+        } catch {
+            if ($attempt -eq 9) { throw }
+            Start-Sleep -Milliseconds 500
+        }
+    }
     $address = @($result | Where-Object {
         $_.PSObject.Properties.Name -contains "IPAddress" -and
         $_.PSObject.Properties.Name -contains "InterfaceIndex"
