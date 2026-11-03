@@ -316,8 +316,8 @@ No ADB connection is needed for normal client operation.
    private service profile and learned BSSID without opening the activity,
    scanning or another Wi-Fi approval dialog. Verify
    new pages from the browser with mobile data still off. Repeat a client
-   reboot while the host is briefly absent, then start host Direct before the
-   any number of pinned failures and expect no-dialog recovery. A longer
+   reboot while the host is absent, then start host Direct after any number
+   of pinned failures and expect no-dialog recovery. A longer
    absence alone must never trigger SSID-only fallback; use changed-BSSID scan
    evidence separately as in step 4.
    If USB is unavailable, reboot through the power menu and inspect the VPN UI.
@@ -423,3 +423,51 @@ the added empty/single/multiple route and transient-1232 tests must run on Windo
 A subsequent focused Windows static/backend run passed all 45 selected tests.
 `git diff --check` passed. Recovery timing, CIM launcher survival and Android
 permission behavior still require the device checks above.
+
+
+## Round 4: retained VPN, quiet notifications, selected USB and DNS readiness
+
+Device verification for Claude (not performed by the offline checks):
+
+1. On S10+ with Always-on, record the `:vpn` PID and native-worker start. Drop
+   Direct twice, including an outage beyond three platform request timeouts.
+   The PID, VPN interface and native worker must survive; no Shutdown, Forcing
+   exit, Zygote exit, service crash/restart or approval dialog is expected for
+   the unchanged BSSID. Test fresh TCP requests while offline (must fail with
+   no cellular/VPN escape), then after Wi-Fi returns (must use host egress).
+2. With weak signal/stale scans, verify pinned retries remain capped at 60 s.
+   For a real changed BSSID, verify three fresh same-SSID/other-BSSID scans with
+   the pin absent before wildcard approval. After approval, drop again and
+   verify the request is pinned. Test readable and redacted connected BSSIDs;
+   the latter must preserve the previous stored pin.
+3. On S21+ generate traffic, client joins/leaves and repeated
+   QUERY_LOCAL_HOTSPOT requests. Notification 77 should post only when its
+   text changes, at most once per two seconds, with no shedding. Confirm
+   the final changed egress/transport text appears after a burst.
+4. Attach S21+ `R3CR406AAGE` and S10+ `R39M202FZ7E`, with S10+ listed first.
+   Watcher must select the trusted S21+, forward its port, recover after its
+   reconnect, and leave S10+ untouched. Device enumeration is global; every
+   device/forward operation and delegated USB start must carry the S21+ serial.
+5. Move Linux from home Wi-Fi to Direct with Tailscale active, then start
+   `./tools/pdalink.sh wifi tunnel start`. Immediately after reported readiness,
+   run `curl https://api.ipify.org` and repeat DNS lookups. In root-helper logs
+   verify DNS servers, `~.`, default-route yes, cache flush and a successful
+   uncached query explicitly on pdalink0 before readiness. Test failed DNS too:
+   startup must fail and restore its routes/DNS without publishing ready state.
+
+The likely initial DNS stall was startup ordering: system-start published its
+state before entering the packet loop, with a synchronous Tailscale compatibility
+restart (up to 20 s, plus its activity check) in between. The wrapper could report
+ready while UDP DNS waited in the TUN. Domains/default-route were already set;
+stale resolved cache/in-flight queries during the Wi-Fi transition could compound
+this. DNS conversion opens a TCP/53 CONNECT on demand, so a PAC probe alone is
+insufficient. The root helper now pumps packets before probing DNS and publishing
+state, and continues pumping during Tailscale compatibility work. It flushes
+resolved caches after link setup and allows six bounded DNS probes; wrapper and
+watcher startup deadlines include this wait. No resolvectl is run by the watcher.
+
+Offline verification: Gradle offline client/host tests and debug assembly passed
+(14 client tests, 40 host tests). Client APK contains all four pinned native ABIs.
+Full pytest: 311 passed, 8 skipped, only the known GTK dependency failure
+`test_linux_install_dry_run_prints_udev_rules`. Native binaries are read from the
+shared build-tools path; device behavior still needs the checks above.

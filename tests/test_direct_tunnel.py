@@ -96,3 +96,113 @@ def test_legacy_unbound_service_is_unhealthy_and_resume_resets_usb_hysteresis(tm
     w.usb_healthy_since = 0.0
     w.handle_resume()
     assert w.usb_healthy_since is None
+
+
+def test_dns_configuration_flushes_only_after_link_is_fully_configured():
+    config = lite.SystemRouteConfig('pdalink0', '10.66.0.2/24', 1500, (), watch.DIRECT_PROXY_URL)
+    with mock.patch.object(lite.shutil, 'which', return_value='/stub/resolvectl'):
+        assert lite.build_dns_setup_commands(config) == [
+            ['resolvectl', 'dns', 'pdalink0', '1.1.1.1', '8.8.8.8'],
+            ['resolvectl', 'domain', 'pdalink0', '~.'],
+            ['resolvectl', 'default-route', 'pdalink0', 'yes'],
+            ['resolvectl', 'flush-caches'],
+        ]
+
+
+def test_dns_probe_is_uncached_interface_scoped_and_retries():
+    config = lite.SystemRouteConfig('pdalink0', '10.66.0.2/24', 1500, (), watch.DIRECT_PROXY_URL)
+    with mock.patch.object(lite, 'run_command', side_effect=[lite.CommandResult(1, '', 'timeout'),
+            lite.CommandResult(0, '1.2.3.4', '')]) as command, mock.patch.object(lite.time, 'sleep'):
+        assert lite.wait_for_tunnel_dns(config)
+        assert command.call_count == 2
+        assert command.call_args.args[0] == ['resolvectl', 'query', '--interface', 'pdalink0',
+                                             '--cache=no', '--type=A', 'api.ipify.org']
+    with mock.patch.object(lite, 'run_command', return_value=lite.CommandResult(1, '', 'timeout')) as command, \
+            mock.patch.object(lite.time, 'sleep'):
+        assert not lite.wait_for_tunnel_dns(config)
+        assert command.call_count == 6
+
+
+def test_dns_readiness_pumps_adapter_before_probe_and_stops_on_failure():
+    import threading
+    config = lite.SystemRouteConfig('pdalink0', '10.66.0.2/24', 1500, (), watch.DIRECT_PROXY_URL)
+    class Adapter:
+        def __init__(self):
+            self.stop_event = threading.Event()
+            self.started = threading.Event()
+        def run(self, **kwargs):
+            self.started.set()
+            self.stop_event.wait(2)
+    for success in (True, False):
+        adapter = Adapter()
+        def probe(_config):
+            assert adapter.started.wait(1)
+            assert not adapter.stop_event.is_set()
+            return success
+        with mock.patch.object(lite, 'wait_for_tunnel_dns', side_effect=probe):
+            if success:
+                worker = lite.start_dns_ready_adapter(config, adapter)
+                assert worker.thread.is_alive()
+                worker.stop()
+                assert not worker.thread.is_alive()
+            else:
+                import pytest
+                with pytest.raises(RuntimeError, match='refusing to report connected'):
+                    lite.start_dns_ready_adapter(config, adapter)
+                assert adapter.stop_event.is_set()
+
+
+def test_failed_dns_probe_never_writes_ready_state_and_rolls_back(tmp_path):
+    args = lite.build_parser().parse_args(['system-start', '--proxy-url', watch.DIRECT_PROXY_URL,
+        '--state-file', str(tmp_path / 'system.json'), '--no-tailscale-compat'])
+    adapter = mock.Mock()
+    with mock.patch.object(lite.os, 'geteuid', return_value=0), \
+            mock.patch.object(lite, 'proxy_upstream_device', return_value='wlan0'), \
+            mock.patch.object(lite, 'print_system_proxy_probe', return_value=True), \
+            mock.patch.object(lite, 'existing_tun_route_conflicts', return_value=[]), \
+            mock.patch.object(tun.TunHttpAdapter, 'open', return_value=adapter), \
+            mock.patch.object(lite, 'build_dns_setup_commands', return_value=[['resolvectl', 'flush-caches']]), \
+            mock.patch.object(lite, 'run_privileged_network_commands', return_value=0), \
+            mock.patch.object(lite, 'start_dns_ready_adapter', side_effect=RuntimeError('DNS failed')), \
+            mock.patch.object(lite, 'write_system_state') as state, \
+            mock.patch.object(lite, 'run_network_commands_best_effort', return_value=True) as cleanup:
+        assert lite.system_start(args) == 1
+        state.assert_not_called()
+        cleanup.assert_called_once()
+        adapter.close.assert_called_once()
+
+
+
+def test_dns_and_packet_loop_ready_before_state_and_tailscale_work(tmp_path):
+    import threading
+    path = tmp_path / 'system.json'
+    args = lite.build_parser().parse_args(['system-start', '--proxy-url', watch.DIRECT_PROXY_URL,
+                                         '--state-file', str(path)])
+    adapter = mock.Mock()
+    adapter.stop_event = threading.Event()
+    pumping = threading.Event()
+    def run_adapter(**kwargs):
+        pumping.set()
+        adapter.stop_event.wait(2)
+    adapter.run.side_effect = run_adapter
+    def probe(config):
+        assert pumping.wait(1)
+        assert not path.exists()
+        return True
+    def tailscale(config):
+        assert pumping.is_set()
+        assert path.exists()
+        assert not adapter.stop_event.is_set()
+        adapter.stop_event.set()
+    with mock.patch.object(lite.os, 'geteuid', return_value=0), \
+            mock.patch.object(lite, 'proxy_upstream_device', return_value='wlan0'), \
+            mock.patch.object(lite, 'print_system_proxy_probe', return_value=True), \
+            mock.patch.object(lite, 'existing_tun_route_conflicts', return_value=[]), \
+            mock.patch.object(tun.TunHttpAdapter, 'open', return_value=adapter), \
+            mock.patch.object(lite, 'build_dns_setup_commands', return_value=[['resolvectl', 'flush-caches']]), \
+            mock.patch.object(lite, 'run_privileged_network_commands', return_value=0), \
+            mock.patch.object(lite, 'wait_for_tunnel_dns', side_effect=probe), \
+            mock.patch.object(lite, 'restart_active_tailscale_after_route_override', side_effect=tailscale), \
+            mock.patch.object(lite, 'run_network_commands_best_effort', return_value=True):
+        assert lite.system_start(args) == 0
+        assert not path.exists()

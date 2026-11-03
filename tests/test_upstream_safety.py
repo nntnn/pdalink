@@ -73,6 +73,7 @@ def test_direct_system_start_binds_before_routes_and_preserves_dns_state(tmp_pat
         assert adapter.proxy.upstream_device == 'wlan0'
     adapter.run.side_effect = run_adapter
     with mock.patch.object(lite.os, 'geteuid', return_value=0), mock.patch.object(
+            lite, 'start_dns_ready_adapter', return_value=None), mock.patch.object(
             lite, 'proxy_upstream_device', return_value='wlan0'), mock.patch.object(
             lite, 'print_system_proxy_probe', return_value=True), mock.patch.object(
             lite, 'existing_tun_route_conflicts', return_value=[]), mock.patch.object(

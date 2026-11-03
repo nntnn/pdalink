@@ -2118,7 +2118,8 @@ class LinuxCliTest(unittest.TestCase):
                 tailscale_compat=True,
             )
             stdout = io.StringIO()
-            with mock.patch.object(pdalink_lite.os, "geteuid", return_value=0), \
+            with mock.patch.object(pdalink_lite, "start_dns_ready_adapter", return_value=None), \
+                    mock.patch.object(pdalink_lite.os, "geteuid", return_value=0), \
                     mock.patch.dict(sys.modules, {"pdalink_tun": mock.Mock(TunHttpAdapter=FakeTunHttpAdapter)}), \
                     mock.patch.object(pdalink_lite, "existing_tun_route_conflicts", return_value=[]), \
                     mock.patch.object(
@@ -2248,7 +2249,8 @@ class LinuxCliTest(unittest.TestCase):
             )
             stderr = io.StringIO()
             stdout = io.StringIO()
-            with mock.patch.object(pdalink_lite.os, "geteuid", return_value=0), \
+            with mock.patch.object(pdalink_lite, "start_dns_ready_adapter", return_value=None), \
+                    mock.patch.object(pdalink_lite.os, "geteuid", return_value=0), \
                     mock.patch.dict(sys.modules, {"pdalink_tun": mock.Mock(TunHttpAdapter=FakeTunHttpAdapter)}), \
                     mock.patch.object(pdalink_lite, "existing_tun_route_conflicts", return_value=[]), \
                     mock.patch.object(pdalink_lite, "run_privileged_network_commands", return_value=0), \
@@ -2537,7 +2539,8 @@ class LinuxCliTest(unittest.TestCase):
             state_file="/unwritable/system.json",
         )
         stderr = io.StringIO()
-        with mock.patch.object(pdalink_lite.os, "geteuid", return_value=0), \
+        with mock.patch.object(pdalink_lite, "start_dns_ready_adapter", return_value=None), \
+                mock.patch.object(pdalink_lite.os, "geteuid", return_value=0), \
                 mock.patch.dict(sys.modules, {"pdalink_tun": mock.Mock(TunHttpAdapter=FakeTunHttpAdapter)}), \
                 mock.patch.object(pdalink_lite, "existing_tun_route_conflicts", return_value=[]), \
                 mock.patch.object(pdalink_lite, "run_privileged_network_commands", return_value=0), \

@@ -20,6 +20,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -2025,6 +2026,59 @@ def proxy_upstream_device(config: SystemRouteConfig) -> str:
     return route.dev
 
 
+def wait_for_tunnel_dns(config: SystemRouteConfig) -> bool:
+    """Root helper only: force an uncached query onto the managed TUN link.
+
+    The adapter must already be pumping packets so UDP/53 can become proxy
+    CONNECT + TCP DNS. Do not let resolved's other links/cache satisfy readiness.
+    """
+    for attempt in range(6):
+        result = run_command(["resolvectl", "query", "--interface", config.iface,
+                              "--cache=no", "--type=A", "api.ipify.org"], timeout=5.0)
+        if result.returncode == 0:
+            return True
+        if attempt < 5:
+            time.sleep(0.5)
+    return False
+
+
+class DnsReadyAdapter:
+    def __init__(self, adapter):
+        self.adapter = adapter
+        self.error = None
+        self.thread = threading.Thread(target=self.run, name="pdalink-adapter", daemon=True)
+
+    def run(self):
+        try:
+            self.adapter.run(close_on_exit=False)
+        except Exception as exc:
+            self.error = exc
+
+    def join(self):
+        while self.thread.is_alive():
+            self.thread.join(0.5)
+        if self.error is not None:
+            raise RuntimeError(f"packet adapter failed: {self.error}")
+
+    def stop(self):
+        self.adapter.stop_event.set()
+        self.thread.join()
+
+
+def start_dns_ready_adapter(config: SystemRouteConfig, adapter):
+    if not should_manage_dns(config):
+        return None
+    worker = DnsReadyAdapter(adapter)
+    worker.thread.start()
+    try:
+        if not wait_for_tunnel_dns(config) or not worker.thread.is_alive():
+            raise RuntimeError("DNS probe through tunnel failed; refusing to report connected")
+    except BaseException:
+        worker.stop()
+        raise
+    return worker
+
+
 def system_start(args: argparse.Namespace) -> int:
     try:
         config = system_config_from_args(args)
@@ -2101,11 +2155,21 @@ def system_start(args: argparse.Namespace) -> int:
         adapter.close()
         return status
 
+    try:
+        worker = start_dns_ready_adapter(config, adapter)
+    except (RuntimeError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        run_network_commands_best_effort(build_adapter_owned_tun_teardown_commands(config))
+        adapter.close()
+        return 1
+
     state_path = system_state_path(getattr(args, "state_file", ""))
     try:
         write_system_state(state_path, config)
     except OSError as exc:
         print(f"failed to write system state {state_path}: {exc}", file=sys.stderr)
+        if worker is not None:
+            worker.stop()
         run_network_commands_best_effort(build_adapter_owned_tun_teardown_commands(config))
         adapter.close()
         return 1
@@ -2117,10 +2181,15 @@ def system_start(args: argparse.Namespace) -> int:
     print("press Ctrl-C to stop and restore routes")
     cleanup_ok = True
     try:
-        adapter.run(close_on_exit=False)
+        if worker is None:
+            adapter.run(close_on_exit=False)
+        else:
+            worker.join()
     except KeyboardInterrupt:
         print("stopping system internet adapter")
     finally:
+        if worker is not None:
+            worker.stop()
         cleanup_ok = run_network_commands_best_effort(build_adapter_owned_tun_teardown_commands(config))
         adapter.close()
         if cleanup_ok:
@@ -2673,6 +2742,7 @@ def build_dns_setup_commands(config: SystemRouteConfig) -> list[list[str]]:
         ["resolvectl", "dns", config.iface, *config.dns_servers],
         ["resolvectl", "domain", config.iface, "~."],
         ["resolvectl", "default-route", config.iface, "yes"],
+        ["resolvectl", "flush-caches"],
     ]
 
 
@@ -4717,6 +4787,7 @@ def add_wifi_direct_target_args(parser: argparse.ArgumentParser) -> None:
 
 
 def add_usb_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--adb-serial", default="")
     parser.add_argument("--local-port", type=int, default=int(os.getenv("PDALINK_USB_LOCAL_PORT", USB_LOCAL_PORT)))
     parser.add_argument("--remote-port", type=int, default=int(os.getenv("PDALINK_USB_REMOTE_PORT", USB_REMOTE_PORT)))
 

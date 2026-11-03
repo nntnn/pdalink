@@ -602,7 +602,7 @@ class PdaLinkWatcher:
                     "unhealthy system service could not be stopped safely",
                 )
             self.state.service_owned = False
-        result = self.run_write(self.service_args("start"), timeout=30.0)
+        result = self.run_write(self.service_args("start"), timeout=60.0)
         if result.returncode != 0:
             return False, (result.stderr or result.stdout).strip() or "system service start failed"
         self.state.service_owned = not self.config.dry_run
