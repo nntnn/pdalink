@@ -25,7 +25,7 @@ android {
 
     sourceSets {
         main.java.srcDir "../shared/src/main/java"
-        main.jniLibs.srcDir rootProject.file("../.tools/android-deps/tun2proxy-0.8.2/tun2proxy-android-libs")
+        main.jniLibs.srcDir(System.getenv("PDALINK_TUN2PROXY_LIBS") ?: rootProject.file("../.tools/android-deps/tun2proxy-0.8.2/tun2proxy-android-libs"))
     }
 }
 

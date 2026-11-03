@@ -26,7 +26,7 @@ class AndroidClientContractTest(unittest.TestCase):
         self.assertIn("connectivityManager.bindProcessToNetwork(network)", service)
         self.assertIn("builder.addDisallowedApplication(getPackageName())", service)
         self.assertIn("network.openConnection(pacUrl)", service)
-        self.assertLess(service.index("probeProxy(network)"), service.index("establishTunnel()"))
+        self.assertLess(service.index("probeProxy(network, probeGeneration)"), service.index("establishTunnel()"))
         self.assertIn("Tun2proxy.run", service)
         self.assertIn(' --proxy " + connection.proxyUrl', service)
 

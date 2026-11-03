@@ -73,6 +73,8 @@ public class MainActivity extends Activity {
         connectButton.setOnClickListener(view -> connect());
         disconnectButton.setOnClickListener(view -> disconnect());
         renderStatus(getString(R.string.status_stopped), "");
+        String saved = getPreferences(MODE_PRIVATE).getString("profile", "");
+        if (!saved.isEmpty()) parseConnection(saved);
     }
 
     @Override
@@ -121,6 +123,7 @@ public class MainActivity extends Activity {
             showError(exception.getMessage());
             return;
         }
+        getPreferences(MODE_PRIVATE).edit().putString("profile", connection.toUri()).commit();
         connectionCodeView.setText("");
         connectionDetails.setVisibility(View.VISIBLE);
         networkView.setText(connection.ssid);
