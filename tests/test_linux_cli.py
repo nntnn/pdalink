@@ -3349,5 +3349,36 @@ class LinuxCliTest(unittest.TestCase):
         self.assertEqual(parsed_tcp.flags & (pdalink_tun.TCP_SYN | pdalink_tun.TCP_ACK), pdalink_tun.TCP_SYN | pdalink_tun.TCP_ACK)
 
 
+class GsettingsBinaryTest(unittest.TestCase):
+    def test_prefers_system_gsettings_over_path(self):
+        with mock.patch.object(pdalink_lite.os.path, "isfile", side_effect=lambda p: p == "/usr/bin/gsettings"), \
+                mock.patch.object(pdalink_lite.os, "access", return_value=True), \
+                mock.patch.object(pdalink_lite.shutil, "which", return_value="/opt/conda/bin/gsettings"):
+            self.assertEqual(pdalink_lite.gsettings_binary(), "/usr/bin/gsettings")
+
+    def test_falls_back_to_path_when_no_system_binary(self):
+        with mock.patch.object(pdalink_lite.os.path, "isfile", return_value=False), \
+                mock.patch.object(pdalink_lite.shutil, "which", return_value="/opt/conda/bin/gsettings"):
+            self.assertEqual(pdalink_lite.gsettings_binary(), "/opt/conda/bin/gsettings")
+
+    def test_run_gsettings_strips_backend_overrides(self):
+        captured = {}
+
+        def fake_run(command, **kwargs):
+            captured["command"] = command
+            captured["env"] = kwargs["env"]
+            return subprocess.CompletedProcess(command, 0, "'none'\n", "")
+
+        env = {"PATH": "/usr/bin", "GSETTINGS_SCHEMA_DIR": "/opt/conda/share", "GSETTINGS_BACKEND": "keyfile"}
+        with mock.patch.dict(pdalink_lite.os.environ, env, clear=True), \
+                mock.patch.object(pdalink_lite, "gsettings_binary", return_value="/usr/bin/gsettings"), \
+                mock.patch.object(pdalink_lite.subprocess, "run", side_effect=fake_run):
+            self.assertEqual(pdalink_lite.gsettings_get("mode"), "'none'")
+        self.assertEqual(captured["command"], ["/usr/bin/gsettings", "get", "org.gnome.system.proxy", "mode"])
+        self.assertNotIn("GSETTINGS_SCHEMA_DIR", captured["env"])
+        self.assertNotIn("GSETTINGS_BACKEND", captured["env"])
+        self.assertEqual(captured["env"]["PATH"], "/usr/bin")
+
+
 if __name__ == "__main__":
     unittest.main()

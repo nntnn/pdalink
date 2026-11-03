@@ -1061,8 +1061,40 @@ def parse_gsettings_string(raw: str) -> str:
     return value if isinstance(value, str) else raw
 
 
+SYSTEM_GSETTINGS_CANDIDATES = ("/usr/bin/gsettings", "/bin/gsettings")
+# Variables that make a bundled gsettings (e.g. conda's) read a different schema
+# set or write a private keyfile instead of the desktop's dconf database.
+GSETTINGS_ENV_OVERRIDES = ("GSETTINGS_BACKEND", "GSETTINGS_SCHEMA_DIR", "GIO_MODULE_DIR", "GIO_EXTRA_MODULES")
+
+
+def gsettings_binary() -> str | None:
+    """Prefer the distro gsettings so changes reach the real GNOME (dconf) settings.
+
+    A gsettings found first on PATH may come from conda or another bundled GLib
+    without the dconf GIO module; it silently falls back to a keyfile backend.
+    """
+    for candidate in SYSTEM_GSETTINGS_CANDIDATES:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return shutil.which("gsettings")
+
+
+def run_gsettings(args: list[str]) -> CommandResult:
+    binary = gsettings_binary()
+    if binary is None:
+        return CommandResult(127, "", "gsettings not found")
+    env = {key: value for key, value in os.environ.items() if key not in GSETTINGS_ENV_OVERRIDES}
+    try:
+        result = subprocess.run(
+            [binary, *args], text=True, capture_output=True, check=False, timeout=5.0, env=env
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return CommandResult(1, "", str(exc))
+    return CommandResult(result.returncode, result.stdout, result.stderr)
+
+
 def gsettings_get(key: str) -> str:
-    result = run_command(["gsettings", "get", GNOME_PROXY_SCHEMA, key], timeout=5.0)
+    result = run_gsettings(["get", GNOME_PROXY_SCHEMA, key])
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip() or f"gsettings exited {result.returncode}"
         raise RuntimeError(f"cannot read GNOME proxy {key}: {detail}")
@@ -1070,17 +1102,14 @@ def gsettings_get(key: str) -> str:
 
 
 def gsettings_set(key: str, serialized_value: str) -> None:
-    result = run_command(
-        ["gsettings", "set", GNOME_PROXY_SCHEMA, key, serialized_value],
-        timeout=5.0,
-    )
+    result = run_gsettings(["set", GNOME_PROXY_SCHEMA, key, serialized_value])
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip() or f"gsettings exited {result.returncode}"
         raise RuntimeError(f"cannot set GNOME proxy {key}: {detail}")
 
 
 def gnome_proxy_snapshot() -> dict[str, str]:
-    if shutil.which("gsettings") is None:
+    if gsettings_binary() is None:
         raise RuntimeError(
             "gsettings not found; use `./tools/pdalink.sh wifi env --probe` "
             "or configure the desktop proxy manually"
