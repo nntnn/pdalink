@@ -62,16 +62,16 @@ public final class PdaLinkVpnService extends VpnService {
     private int retryAttempt;
     private ReconnectPolicy reconnectPolicy = new ReconnectPolicy();
     private String savedBssid;
+    private long lastScanTimestamp;
     private String lastState;
     private String lastDetail = "";
     private final Runnable retry = () -> {
         if (stopping) return;
-        if (nativeThread != null) {
-            Tun2proxy.stop();
+        if (nativeThread != null && vpnInterface == null) {
             mainHandler.postDelayed(this.retry, 1000L);
-        } else {
-            requestWifiNetwork();
+            return;
         }
+        requestWifiNetwork();
     };
 
     @Override
@@ -203,8 +203,31 @@ public final class PdaLinkVpnService extends VpnService {
         prefs.edit().putString("bssid", bssid).commit();
     }
 
+    private void checkBssidChange() {
+        java.util.List<String> bssids = new java.util.ArrayList<>();
+        long newest = 0;
+        try {
+            WifiManager manager = getApplicationContext().getSystemService(WifiManager.class);
+            if (manager != null) {
+                long now = android.os.SystemClock.elapsedRealtime() * 1000L;
+                for (android.net.wifi.ScanResult scan : manager.getScanResults()) {
+                    if (connection.ssid.equals(scan.SSID) && now >= scan.timestamp
+                            && now - scan.timestamp <= 30_000_000L) {
+                        bssids.add(scan.BSSID);
+                        newest = Math.max(newest, scan.timestamp);
+                    }
+                }
+            }
+        } catch (SecurityException ignored) { }
+        // Repeated cached scans cannot turn one observation into N checks.
+        reconnectPolicy.onScanCheck(savedBssid, newest > lastScanTimestamp
+                ? bssids : java.util.Collections.emptyList());
+        lastScanTimestamp = Math.max(lastScanTimestamp, newest);
+    }
+
     private void requestWifiNetwork() {
         if (stopping || networkCallback != null) return;
+        checkBssidChange();
         final String requestBssid = reconnectPolicy.requestBssid(savedBssid);
         final int requestGeneration = ++generation;
         WifiNetworkSpecifier.Builder wifi = new WifiNetworkSpecifier.Builder()
@@ -232,7 +255,7 @@ public final class PdaLinkVpnService extends VpnService {
                 connectivityManager.requestNetwork(request, networkCallback, timeout);
             }
         } catch (RuntimeException exception) {
-            shutdown(getString(R.string.status_error), getString(R.string.wifi_request_failed));
+            reconnect(getString(R.string.wifi_request_failed));
         }
     }
 
@@ -279,11 +302,6 @@ public final class PdaLinkVpnService extends VpnService {
         public void onUnavailable() {
             mainHandler.post(() -> {
                 if (requestGeneration == generation && !stopping) {
-                    reconnectPolicy.onRequestFailure(requestBssid != null);
-                    if (requestBssid != null && reconnectPolicy.requestBssid(savedBssid) == null) {
-                        savedBssid = null;
-                        getSharedPreferences("vpn", MODE_PRIVATE).edit().remove("bssid").commit();
-                    }
                     reconnect(getString(R.string.wifi_unavailable));
                 }
             });
@@ -297,7 +315,7 @@ public final class PdaLinkVpnService extends VpnService {
         wifiNetwork = network;
         reconnectPolicy.onWifiAvailable();
         if (!connectivityManager.bindProcessToNetwork(network)) {
-            shutdown(getString(R.string.status_error), getString(R.string.wifi_bind_failed));
+            reconnect(getString(R.string.wifi_bind_failed));
             return;
         }
         setUnderlyingNetworks(new Network[]{network});
@@ -349,6 +367,12 @@ public final class PdaLinkVpnService extends VpnService {
     }
 
     private void establishTunnel() {
+        retryAttempt = 0;
+        if (vpnInterface != null && nativeThread != null) {
+            sendStatus(getString(R.string.status_connected), connection.ssid);
+            updateNotification(getString(R.string.status_connected));
+            return;
+        }
         Builder builder = new Builder()
                 .setSession(getString(R.string.vpn_session))
                 .setMtu(MTU)
@@ -368,7 +392,6 @@ public final class PdaLinkVpnService extends VpnService {
             return;
         }
         retryAttempt = 0;
-        final int tunnelGeneration = generation;
         int tunFd = vpnInterface.getFd();
         String arguments = "tun2proxy"
                 + " --tun-fd " + tunFd
@@ -383,7 +406,7 @@ public final class PdaLinkVpnService extends VpnService {
             int result = Tun2proxy.run(arguments, (char) MTU);
             mainHandler.post(() -> {
                 nativeThread = null;
-                if (!stopping && tunnelGeneration == generation) {
+                if (!stopping) {
                     reconnect(getString(R.string.tunnel_stopped_format, result));
                 }
             });
@@ -394,7 +417,7 @@ public final class PdaLinkVpnService extends VpnService {
     private void reconnect(String detail) {
         if (stopping) return;
         mainHandler.removeCallbacks(retry);
-        releaseNetwork();
+        releaseWifiRequest();
         sendStatus(getString(R.string.status_starting), detail);
         updateNotification(getString(R.string.waiting_for_wifi));
         mainHandler.postDelayed(retry, ReconnectPolicy.delayMillis(retryAttempt++));
@@ -412,6 +435,13 @@ public final class PdaLinkVpnService extends VpnService {
             }
             vpnInterface = null;
         }
+        releaseWifiRequest();
+        connectivityManager.bindProcessToNetwork(null);
+        setUnderlyingNetworks(null);
+    }
+
+    private void releaseWifiRequest() {
+        generation++;
         if (networkCallback != null) {
             try {
                 connectivityManager.unregisterNetworkCallback(networkCallback);
@@ -420,8 +450,10 @@ public final class PdaLinkVpnService extends VpnService {
             networkCallback = null;
         }
         wifiNetwork = null;
-        connectivityManager.bindProcessToNetwork(null);
-        setUnderlyingNetworks(null);
+        // Keep the dead Wi-Fi binding: new native proxy sockets fail closed,
+        // instead of escaping over cellular/default VPN. onAvailable rebinds
+        // all subsequently created sockets to the replacement Wi-Fi Network.
+        setUnderlyingNetworks(new Network[0]);
     }
 
     private void shutdown(String state, String detail) {

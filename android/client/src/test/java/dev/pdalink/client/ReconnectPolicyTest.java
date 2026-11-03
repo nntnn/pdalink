@@ -25,40 +25,38 @@ public class ReconnectPolicyTest {
         for (String bssid : invalid) assertNull(bssid, ReconnectPolicy.normalizeBssid(bssid));
     }
 
-    @Test public void usesPinUntilThreeConsecutiveAcquisitionFailuresThenRelearns() {
+    @Test public void failuresAndMissingScansKeepPinForever() {
         ReconnectPolicy policy = new ReconnectPolicy();
-        String bssid = "7a:46:d4:b5:0b:39";
-        assertNull(policy.requestBssid(null));
-        assertNull(policy.requestBssid("02:00:00:00:00:00"));
-        for (int failure = 0; failure < ReconnectPolicy.PINNED_FAILURE_LIMIT; failure++) {
-            assertEquals(bssid, policy.requestBssid(bssid));
-            policy.onRequestFailure(true);
+        for (int i = 0; i < 100; i++) {
+            policy.onScanCheck(PIN, java.util.Collections.emptyList());
+            assertEquals(PIN, policy.requestBssid(PIN));
         }
-        assertNull(policy.requestBssid(bssid));
-        // Further wildcard failures must keep waiting for approval, not revive the stale pin.
-        policy.onRequestFailure(false);
-        assertNull(policy.requestBssid(bssid));
-        policy.onWifiAvailable();
-        assertEquals("7a:46:d4:b5:0b:40", policy.requestBssid("7a:46:d4:b5:0b:40"));
     }
 
-    @Test public void successfulWifiAcquisitionBreaksFailureStreak() {
+    private static final String PIN = "7a:46:d4:b5:0b:39";
+    private static final String OTHER = "7a:46:d4:b5:0b:40";
+
+    @Test public void requiresConsecutiveChangedBssidEvidence() {
         ReconnectPolicy policy = new ReconnectPolicy();
-        policy.onRequestFailure(true);
-        policy.onRequestFailure(true);
+        policy.onScanCheck(PIN, java.util.List.of(OTHER));
+        policy.onScanCheck(PIN, java.util.List.of(OTHER));
+        assertEquals(PIN, policy.requestBssid(PIN));
+        policy.onScanCheck(PIN, java.util.List.of(PIN, OTHER));
+        policy.onScanCheck(PIN, java.util.List.of(OTHER));
+        policy.onScanCheck(PIN, java.util.List.of("02:00:00:00:00:00"));
+        for (int i = 0; i < ReconnectPolicy.BSSID_CHANGE_CHECKS; i++)
+            policy.onScanCheck(PIN, java.util.List.of(OTHER));
+        assertNull(policy.requestBssid(PIN));
         policy.onWifiAvailable();
-        policy.onRequestFailure(true);
-        policy.onRequestFailure(true);
-        assertEquals("7a:46:d4:b5:0b:39", policy.requestBssid("7a:46:d4:b5:0b:39"));
+        // A redacted successful connection retains the stored pin.
+        assertEquals(PIN, policy.requestBssid(PIN));
+        assertEquals(OTHER, policy.requestBssid(OTHER));
     }
 
     @Test public void onlyPinnedRequestsTimeOut() {
-        assertEquals(60_000, ReconnectPolicy.timeoutMillis("7a:46:d4:b5:0b:39"));
+        assertEquals(60_000, ReconnectPolicy.timeoutMillis(PIN));
         assertEquals(0, ReconnectPolicy.timeoutMillis(null));
         assertEquals(0, ReconnectPolicy.timeoutMillis("02:00:00:00:00:00"));
-        ReconnectPolicy policy = new ReconnectPolicy();
-        for (int i = 0; i < ReconnectPolicy.PINNED_FAILURE_LIMIT; i++) policy.onRequestFailure(true);
-        assertEquals(0, ReconnectPolicy.timeoutMillis(policy.requestBssid("7a:46:d4:b5:0b:39")));
     }
 
     private static PdaLinkConnectionUri.Bundle profile(String transport, String ssid,

@@ -4,9 +4,9 @@ import dev.pdalink.shared.PdaLinkConnectionUri;
 import java.util.Locale;
 
 final class ReconnectPolicy {
-    static final int PINNED_FAILURE_LIMIT = 3;
+    static final int BSSID_CHANGE_CHECKS = 3;
     static final int PINNED_TIMEOUT_MS = 60_000;
-    private int pinnedFailures;
+    private int changedBssidChecks;
 
     static String normalizeBssid(String value) {
         if (value == null) return null;
@@ -25,15 +25,27 @@ final class ReconnectPolicy {
     }
 
     String requestBssid(String savedBssid) {
-        return pinnedFailures >= PINNED_FAILURE_LIMIT ? null : normalizeBssid(savedBssid);
+        return changedBssidChecks >= BSSID_CHANGE_CHECKS ? null : normalizeBssid(savedBssid);
     }
 
-    void onRequestFailure(boolean pinned) {
-        if (pinned) pinnedFailures = Math.min(PINNED_FAILURE_LIMIT, pinnedFailures + 1);
+    // Only fresh scans of this SSID count. Timeouts and missing/redacted scans
+    // are not evidence that a stable Direct group changed its BSSID.
+    void onScanCheck(String savedBssid, java.util.List<String> matchingBssids) {
+        String pin = normalizeBssid(savedBssid);
+        boolean other = false;
+        boolean present = false;
+        for (String value : matchingBssids) {
+            String bssid = normalizeBssid(value);
+            if (bssid == null) continue;
+            if (bssid.equals(pin)) present = true;
+            else other = true;
+        }
+        changedBssidChecks = pin != null && other && !present
+                ? Math.min(BSSID_CHANGE_CHECKS, changedBssidChecks + 1) : 0;
     }
 
     void onWifiAvailable() {
-        pinnedFailures = 0;
+        changedBssidChecks = 0;
     }
 
     static int timeoutMillis(String requestBssid) {

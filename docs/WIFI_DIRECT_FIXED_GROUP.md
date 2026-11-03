@@ -116,9 +116,27 @@ clients: that experimental path can negotiate platform credentials.
 Android client preferences are backup-disabled and private to the app. The UI
 stores its last import; only the isolated VPN process owns recovery intent and
 its service profile, avoiding shared preference writes between processes.
-Stale network/probe/native-exit callbacks cannot restart an obsolete generation.
-The native engine is stopped before retry and a new one waits for its predecessor
-to exit. Existing TCP streams still need application-level reconnection.
+Stale network/probe callbacks cannot restart an obsolete generation.
+On upstream loss the VPN interface and tun2proxy worker remain running. Only the
+Wi-Fi request is released; the process keeps its old Wi-Fi Network binding so
+new proxy sockets fail while that Network is gone. A replacement Network is
+bound before the PAC probe and before reporting Connected. The VPN process is
+excluded from its own VPN, and the probe explicitly uses Network.openConnection.
+Existing TCP streams still need application-level reconnection.
+
+This deliberately avoids native stop/restart during Wi-Fi recovery. The pinned
+[tun2proxy 0.8.2 general API](https://github.com/tun2proxy/tun2proxy/blob/v0.8.2/src/general_api.rs)
+starts an unconditional process-exit watchdog after its async run returns; even
+a quick graceful shutdown cannot cancel it. No native binary/API change is
+needed for retained-engine recovery. Explicit Stop, revoke and profile replacement
+still use native teardown and retain this upstream process-exit limitation;
+they are outside transient Wi-Fi recovery.
+
+Pinned retries continue indefinitely with 5–60 s backoff. SSID-only fallback
+requires three consecutive fresh scan checks showing this SSID at another BSSID
+with the saved pin absent. Missing, redacted, stale or repeated cached scans do
+not establish a change. Fallback never deletes the pin. Successful acquisition
+resets the policy to pinned requests, updating the pin only when readable.
 
 No claim is made for whole-system Linux/Windows routing from QR import: PAC
 serves proxy-aware apps. Wintun reboot recovery and a mature full-tunnel data

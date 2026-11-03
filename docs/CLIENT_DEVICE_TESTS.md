@@ -291,14 +291,13 @@ No ADB connection is needed for normal client operation.
    and one native engine may run; stale callbacks must not create a second VPN.
 
    Separately test a changed group BSSID with unchanged credentials. After
-   **three consecutive pinned acquisition failures**, the old pin is cleared
-   and the next request is SSID-only: one approval dialog is acceptable. Allow
-   about 3 min 35 s from the first pinned request through all three timeouts and
-   the 5/10/20 s retries, plus time for Android discovery. Leave this dialog open
-   beyond 60 s: no app timeout may tear it down or stack another request. Approve,
-   then repeat a short outage with the new BSSID: recovery must again need no tap.
-   A long host outage can also exhaust the three attempts and require reapproval;
-   record it separately from the unchanged-pin short-outage acceptance case.
+   **three consecutive fresh scan checks** showing another BSSID for the same
+   SSID while the saved pin is absent, the next request may be SSID-only. One
+   approval dialog is acceptable. Timeouts alone, missing/redacted scans and
+   repeated cached scans must keep retrying pinned forever. Leave any wildcard
+   dialog open beyond 60 s: no app timeout may tear it down or stack a request.
+   Approve, then repeat an outage: the next request must be pinned again. When
+   connected BSSID is redacted, verify the previous stored pin survives.
 
    Import a new QR with a changed SSID, password or security mode: the old BSSID
    must be cleared immediately, even before Connect. Connect and approve the
@@ -318,8 +317,9 @@ No ADB connection is needed for normal client operation.
    scanning or another Wi-Fi approval dialog. Verify
    new pages from the browser with mobile data still off. Repeat a client
    reboot while the host is briefly absent, then start host Direct before the
-   three pinned failures and expect no-dialog recovery. For a longer absence,
-   verify the three-failure SSID-only fallback separately as in step 4.
+   any number of pinned failures and expect no-dialog recovery. A longer
+   absence alone must never trigger SSID-only fallback; use changed-BSSID scan
+   evidence separately as in step 4.
    If USB is unavailable, reboot through the power menu and inspect the VPN UI.
 
 6. Disable Always-on in Settings, tap Disconnect in the client, then restart
