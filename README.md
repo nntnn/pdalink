@@ -118,6 +118,12 @@ cannot send them back into the TUN. The watcher can optionally prefer healthy
 USB and fall back to Direct with `watch run --wifi-direct-failover` or
 `PDALINK_WIFI_DIRECT_FAILOVER=1`; this is off by default. Returning from Direct
 requires 20 seconds of continuous USB health and a 30 second Direct dwell.
+While USB is unavailable, the watcher automatically rejoins the imported
+`pdalink-wifi-direct` NetworkManager profile if Direct is not ready. This can
+switch the laptop Wi-Fi away from another network, including a saved network
+with higher autoconnect priority. Disable rejoining with
+`--wifi-direct-join never` or `PDALINK_WIFI_DIRECT_JOIN=never` to keep passive
+failover. See [auto-rejoin details](docs/WIFI_DIRECT_FIXED_GROUP.md).
 See [client device tests](docs/CLIENT_DEVICE_TESTS.md) for setup, transport
 selection, outage recovery, Windows Wintun, and Android Always-on VPN checks.
 

@@ -77,8 +77,20 @@ Watcher failover is explicitly opt-in with `--wifi-direct-failover` or
 `auto_connect=on_trusted_connect` policy. A trusted authorized USB device and
 working forwarded PAC take priority. If that path cannot be prepared/probed,
 the watcher accepts only a Wi-Fi Direct route and the canonical phone PAC.
-It never joins/replaces a WLAN itself. The already imported NetworkManager
-profile owns reconnection. The Direct PAC check is an identity sanity check,
+By default, when USB is unavailable and Direct is not ready, the watcher
+activates the already imported `pdalink-wifi-direct` NetworkManager profile.
+This switches the laptop Wi-Fi away from other networks, even a saved WLAN
+with higher autoconnect priority. It does not create a missing profile; that
+condition is logged once. Activation has a 25 second command timeout, with
+retries after 15, 30, 60 and then at most every 120 seconds. An existing
+activation gets time to settle; a stuck authentication attempt can be retried.
+An activated Direct profile is left alone. Direct readiness or healthy USB
+resets the retry backoff, and healthy USB prevents Wi-Fi changes.
+
+Use `--wifi-direct-join never` or `PDALINK_WIFI_DIRECT_JOIN=never` to restore
+passive failover; the default policy is `always`. Status reports the latest
+join result as `health-direct_join` (`ok`, `failed`, `missing`, or `backoff`)
+while recovery is pending. The Direct PAC check is an identity sanity check,
 not cryptographic authentication.
 
 Return to USB requires 20 seconds of observed continuous health and 30 seconds
