@@ -443,6 +443,21 @@ that the watcher owns:
 ./tools/pdalink.sh watch once
 ```
 
+If two phones are attached and a serial-selected forward fails with
+`more than one device/emulator`, an older running ADB server may be incompatible
+with the watcher's newer client, even though both report protocol 41. The watcher
+logs `adb-server-mismatch`, confirms the selected phone is authorized, snapshots
+all forwards, and runs `kill-server` / `start-server` with its configured ADB.
+It restores foreign forwards with `--no-rebind` (logging each result), then retries
+once. Restarting briefly interrupts every ADB connection and forward. A failed
+snapshot prevents restart; restoration failures are logged for manual repair.
+Attempts are limited to once per five minutes per watcher process; use
+`--adb-server-restart-backoff SECONDS` (minimum 60) to increase the interval.
+Disable recovery with `watch run --no-adb-server-restart` or
+`PDALINK_ADB_SERVER_RESTART=0`. Failover failures appear in `watch status` as
+`health-usb: <reason>` and in rate-limited `usb:` logs. Standalone
+`usb-start --adb-serial SERIAL` reports the same mismatch with manual recovery guidance.
+
 Ubuntu also has a native GTK4/libadwaita client. It is a D-Bus control surface
 for the watcher; the UI never runs ADB, NetworkManager, or route commands
 itself. The installer creates its desktop entry by default, or it can be
