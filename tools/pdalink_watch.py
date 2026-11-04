@@ -150,6 +150,7 @@ class WatchConfig:
     internet_check_interval: float = 0.0
     internet_check_timeout: float = 6.0
     wifi_direct_failover: bool = False
+    wifi_direct_join: str = "always"
     usb_return_delay: float = 20.0
     transport_min_dwell: float = 30.0
     adb_server_restart: bool = True
@@ -295,6 +296,12 @@ class PdaLinkWatcher:
         self.dbus_server = None
         self.adb_restart_after = 0.0
         self.error_log_after: dict[str, float] = {}
+        self.direct_join_after = 0.0
+        self.direct_join_delay = 15.0
+        self.direct_join_pending_since: float | None = None
+        self.direct_join_attempted = False
+        self.direct_join_missing = False
+        self.direct_join_health = ""
 
     def log(self, message: str) -> None:
         print(message, file=self.stdout, flush=True)
@@ -413,6 +420,10 @@ class PdaLinkWatcher:
         self.state.last_error_code = error_code
         if health is not None:
             self.state.health = dict(health)
+        if self.direct_join_health:
+            self.state.health["direct_join"] = self.direct_join_health
+        else:
+            self.state.health.pop("direct_join", None)
         self.state.health["transport"] = self.active_transport
         changed = before != self.state_signature()
         if not changed and not force:
@@ -843,6 +854,80 @@ class PdaLinkWatcher:
                     '  return "PROXY 192.168.49.1:8001; DIRECT";\n}')
         return pac.replace("\r\n", "\n").rstrip("\n") == expected
 
+    def reset_direct_join(self) -> None:
+        self.direct_join_after = 0.0
+        self.direct_join_delay = 15.0
+        self.direct_join_pending_since = None
+        self.direct_join_attempted = False
+        self.direct_join_missing = False
+        self.direct_join_health = ""
+
+    def join_direct(self) -> None:
+        """Recover the imported NM profile without interrupting a fresh activation."""
+        now = self.boot_clock()
+        if now < self.direct_join_after:
+            self.direct_join_health = "backoff"
+            return
+        profile = pdalink_lite.WIFI_DIRECT_PROFILE_NAME
+        profiles = self.run_read(["nmcli", "-t", "-f", "NAME", "connection", "show"], 5.0)
+        if profiles.returncode:
+            self.direct_join_health = "failed"
+            self.log_error("direct-join: failed: " + safe_detail(profiles.stderr, "cannot list profiles"))
+            self.direct_join_after = self.boot_clock() + self.direct_join_delay
+            self.direct_join_delay = min(120.0, self.direct_join_delay * 2)
+            return
+        if profile not in profiles.stdout.splitlines():
+            if not self.direct_join_missing:
+                self.log("direct-join: profile missing")
+            self.direct_join_missing = True
+            self.direct_join_health = "missing"
+            return
+        self.direct_join_missing = False
+        active = self.run_read(
+            ["nmcli", "-t", "-f", "NAME,DEVICE,STATE", "connection", "show", "--active"], 5.0)
+        if active.returncode:
+            # Do not disrupt an activation whose state we could not establish.
+            self.direct_join_health = "failed"
+            self.log_error("direct-join: failed: " + safe_detail(active.stderr, "cannot read active profiles"))
+            self.direct_join_after = self.boot_clock() + self.direct_join_delay
+            self.direct_join_delay = min(120.0, self.direct_join_delay * 2)
+            return
+        iface = ""
+        pending = False
+        for line in active.stdout.splitlines():
+            fields = pdalink_lite.split_nmcli_terse(line)
+            if len(fields) != 3 or fields[0] != profile:
+                continue
+            iface = fields[1] if fields[1] != "--" else ""
+            if fields[2] == "activated":
+                self.direct_join_pending_since = None
+                self.direct_join_health = "ok"
+                return
+            pending = True
+        if pending and not self.direct_join_attempted:
+            if self.direct_join_pending_since is None:
+                self.direct_join_pending_since = now
+            if now - self.direct_join_pending_since < self.direct_join_delay:
+                self.direct_join_health = "backoff"
+                return
+        else:
+            self.direct_join_pending_since = None
+        command = ["nmcli", "--wait", "20", "connection", "up", profile]
+        if iface:
+            command.extend(["ifname", iface])
+        self.log("direct-join: activating " + profile)
+        result = self.run_write(command, 25.0)
+        self.direct_join_attempted = True
+        # Measure from completion so a timeout still leaves NM time to settle.
+        self.direct_join_after = self.boot_clock() + self.direct_join_delay
+        self.direct_join_delay = min(120.0, self.direct_join_delay * 2)
+        self.direct_join_pending_since = None
+        self.direct_join_health = "ok" if result.returncode == 0 else "failed"
+        if result.returncode == 0:
+            self.log("direct-join: ok")
+        else:
+            self.log("direct-join: failed: " + safe_detail(result.stderr, "activation failed"))
+
     def switch_proxy(self, target: str) -> bool:
         if target == self.active_proxy_url:
             return True
@@ -863,6 +948,7 @@ class PdaLinkWatcher:
     def reconcile(self) -> int:
         if (not self.config.wifi_direct_failover or self.config.transport != "adb"
                 or self.user_config()["auto_connect"] != "on_trusted_connect"):
+            self.reset_direct_join()
             if (not self.config.wifi_direct_failover
                     and not self.switch_proxy(self.config.effective_proxy_url)):
                 return 1
@@ -903,6 +989,10 @@ class PdaLinkWatcher:
         # USB is preferred initially; returning from Direct needs continuous health
         # and a minimum dwell. Loss of Direct bypasses the dwell for recovery.
         direct_ok = self.direct_ready() if on_direct or not usb_ok else False
+        if usb_ok or direct_ok or self.config.wifi_direct_join == "never":
+            self.reset_direct_join()
+        else:
+            self.join_direct()
         return_usb = usb_ok and (not on_direct or not direct_ok or (
             now - self.usb_healthy_since >= self.config.usb_return_delay
             and now - self.transport_since >= self.config.transport_min_dwell))
@@ -1285,6 +1375,8 @@ def raise_stop_requested(signum: int, _frame) -> None:
 def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--wifi-direct-failover", action="store_true",
                         default=os.getenv("PDALINK_WIFI_DIRECT_FAILOVER", "0") == "1")
+    parser.add_argument("--wifi-direct-join", choices=("always", "never"),
+                        default=os.getenv("PDALINK_WIFI_DIRECT_JOIN", "always"))
     parser.add_argument("--adb", default=default_adb_path())
     parser.add_argument("--no-adb-server-restart", dest="adb_server_restart", action="store_false",
                         default=os.getenv("PDALINK_ADB_SERVER_RESTART", "1") != "0")
@@ -1329,6 +1421,7 @@ def config_from_args(args: argparse.Namespace) -> WatchConfig:
         adb_server_restart=args.adb_server_restart,
         adb_server_restart_backoff=max(60.0, args.adb_server_restart_backoff),
         wifi_direct_failover=args.wifi_direct_failover,
+        wifi_direct_join=args.wifi_direct_join,
         transport=args.transport,
         local_port=args.local_port,
         remote_port=args.remote_port,

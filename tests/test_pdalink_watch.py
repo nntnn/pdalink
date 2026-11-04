@@ -1237,3 +1237,146 @@ def test_lite_ambiguous_error_for_unauthorized_serial_is_unchanged(capsys):
     output = capsys.readouterr()
     assert "adb-server-mismatch" not in output.err
     assert "more than one device/emulator" in output.out
+
+
+class DirectJoinRunner(FakeRunner):
+    def __init__(self):
+        super().__init__("")
+        self.profile_exists = True
+        self.active = "zero2w-mgmt-client:wlp1s0:activated\n"
+        self.join_result = pdalink_watch.CommandResult(0)
+        self.joins = []
+
+    def run(self, command, timeout):
+        if command[0] != "nmcli":
+            return super().run(command, timeout)
+        self.calls.append(list(command))
+        if command == ["nmcli", "-t", "-f", "NAME", "connection", "show"]:
+            return pdalink_watch.CommandResult(0, "pdalink-wifi-direct\n" if self.profile_exists else "other\n")
+        if command == ["nmcli", "-t", "-f", "NAME,DEVICE,STATE", "connection", "show", "--active"]:
+            return pdalink_watch.CommandResult(0, self.active)
+        assert command[:6] == ["nmcli", "--wait", "20", "connection", "up", "pdalink-wifi-direct"]
+        self.joins.append((command, timeout))
+        return self.join_result
+
+
+def direct_join_watcher(tmp_path, **options):
+    config = PdaLinkWatchTest().make_config(tmp_path / "watch.json")
+    config = dataclasses.replace(config, wifi_direct_failover=True, **options)
+    runner = DirectJoinRunner()
+    now = [0.0]
+    output = io.StringIO()
+    watcher = pdalink_watch.PdaLinkWatcher(config, runner=runner, probe=ok_probe,
+                                         boot_clock=lambda: now[0], stdout=output)
+    watcher.direct_ready = mock.Mock(return_value=False)
+    return watcher, runner, output, now
+
+
+def test_direct_join_when_usb_down_and_success_next_reconcile(tmp_path):
+    watcher, runner, output, _ = direct_join_watcher(tmp_path)
+    watcher.reconcile()
+    assert runner.joins == [(["nmcli", "--wait", "20", "connection", "up", "pdalink-wifi-direct"], 25.0)]
+    assert watcher.state.health["direct_join"] == "ok"
+    saved = json.loads(watcher.config.state_file.read_text())
+    assert saved["health"]["direct_join"] == "ok"
+    watcher.status()
+    assert "health-direct_join: ok" in output.getvalue()
+    assert "direct-join: activating pdalink-wifi-direct" in output.getvalue()
+    assert "direct-join: ok" in output.getvalue()
+    watcher.direct_ready.return_value = True
+    assert watcher.reconcile() == 0
+    assert watcher.state.mode == "ready"
+    assert watcher.active_transport == "wifi-direct"
+    assert any(is_service_call(c, "start") for c in runner.calls)
+    assert len(runner.joins) == 1
+    watcher.direct_ready.return_value = False
+    watcher.reconcile()
+    assert len(runner.joins) == 2  # Readiness resets the backoff.
+
+
+def test_direct_join_policy_and_usb_gates(tmp_path):
+    watcher, runner, _, _ = direct_join_watcher(tmp_path)
+    for changes in ({"wifi_direct_failover": False}, {"wifi_direct_join": "never"}):
+        watcher.config = dataclasses.replace(watcher.config, **changes)
+        watcher.reconcile()
+        assert not any(c[0] == "nmcli" for c in runner.calls)
+        watcher.config = dataclasses.replace(watcher.config, wifi_direct_failover=True)
+    watcher.config = dataclasses.replace(watcher.config, wifi_direct_join="always")
+    runner.devices = authorized_devices()
+    watcher.reconcile()
+    assert not any(c[0] == "nmcli" for c in runner.calls)
+
+
+def test_direct_join_exponential_backoff_and_failure(tmp_path):
+    watcher, runner, output, now = direct_join_watcher(tmp_path)
+    runner.join_result = pdalink_watch.CommandResult(124, "", "timeout after 25s")
+    for count, instant in enumerate((0, 15, 45, 105, 225, 345), 1):
+        now[0] = instant
+        watcher.reconcile()
+        assert len(runner.joins) == count
+        assert watcher.state.health["direct_join"] == "failed"
+        now[0] += 1
+        watcher.reconcile()
+        assert len(runner.joins) == count
+        assert watcher.state.health["direct_join"] == "backoff"
+    assert "direct-join: failed: timeout after 25s" in output.getvalue()
+    runner.devices = authorized_devices()
+    watcher.reconcile()
+    runner.devices = ""
+    watcher.reconcile()
+    assert len(runner.joins) == 7  # USB health resets the backoff.
+
+
+def test_direct_join_missing_profile_logged_once(tmp_path):
+    watcher, runner, output, now = direct_join_watcher(tmp_path)
+    runner.profile_exists = False
+    for instant in (0, 15, 60, 300):
+        now[0] = instant
+        watcher.reconcile()
+        assert watcher.state.health["direct_join"] == "missing"
+    assert output.getvalue().count("direct-join: profile missing") == 1
+    assert not runner.joins
+    runner.profile_exists = True
+    watcher.reconcile()
+    assert len(runner.joins) == 1
+
+
+def test_direct_join_allows_activation_then_reissues_stuck_need_auth(tmp_path):
+    watcher, runner, _, now = direct_join_watcher(tmp_path)
+    # NM exposes need-auth as an activating active connection.
+    runner.active = "pdalink-wifi-direct:wlp1s0:activating\n"
+    for instant in (0, 14):
+        now[0] = instant
+        watcher.reconcile()
+        assert not runner.joins
+    now[0] = 15
+    watcher.reconcile()
+    assert len(runner.joins) == 1
+    assert runner.joins[0][0][-2:] == ["ifname", "wlp1s0"]
+    now[0] = 29
+    watcher.reconcile()
+    assert len(runner.joins) == 1
+    now[0] = 30
+    watcher.reconcile()
+    assert len(runner.joins) == 2
+    runner.active = "pdalink-wifi-direct:wlp1s0:activated\n"
+    now[0] = 1000
+    watcher.reconcile()
+    assert len(runner.joins) == 2
+
+
+def test_direct_join_dry_run_gates_write(tmp_path):
+    watcher, runner, output, _ = direct_join_watcher(tmp_path, dry_run=True)
+    watcher.reconcile()
+    assert not runner.joins
+    assert "dry-run: nmcli --wait 20 connection up pdalink-wifi-direct" in output.getvalue()
+
+
+def test_direct_join_cli_and_env_policy():
+    with mock.patch.dict("os.environ", {}, clear=True):
+        parser = pdalink_watch.build_parser()
+        assert pdalink_watch.config_from_args(parser.parse_args(["once"])).wifi_direct_join == "always"
+        assert pdalink_watch.config_from_args(parser.parse_args(["once", "--wifi-direct-join", "never"])).wifi_direct_join == "never"
+    with mock.patch.dict("os.environ", {"PDALINK_WIFI_DIRECT_JOIN": "never"}):
+        args = pdalink_watch.build_parser().parse_args(["once"])
+        assert pdalink_watch.config_from_args(args).wifi_direct_join == "never"
