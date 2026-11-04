@@ -1015,3 +1015,225 @@ def test_delegated_usb_start_keeps_selected_adb_serial():
         assert len(command.call_args_list) == 2
         for call in command.call_args_list:
             assert call.args[0][:3] == ['/fake/adb', '-s', 'R3CR406AAGE']
+
+
+class MismatchRunner(FakeRunner):
+    """Old server rejects serial-selected writes until restarted."""
+    def __init__(self):
+        super().__init__(authorized_devices() + "R39M202FZ7E device\n",
+                         forwards="R39M202FZ7E tcp:22222 tcp:2222\n")
+        self.mismatch = True
+        self.snapshot_fails = False
+        self.restore_fails = False
+
+    def run(self, command, timeout):
+        args = command[1:]
+        if args == ["forward", "--list"]:
+            self.calls.append(command)
+            return pdalink_watch.CommandResult(1 if self.snapshot_fails else 0, self.forwards, "")
+        if args == ["version"]:
+            self.calls.append(command)
+            return pdalink_watch.CommandResult(0, "Android Debug Bridge version 1.0.41\nVersion 37.0.0\n")
+        if args in (["kill-server"], ["start-server"]):
+            self.calls.append(command)
+            self.forwards = ""
+            if args == ["start-server"]:
+                self.mismatch = False
+            return pdalink_watch.CommandResult(0)
+        if len(args) > 3 and args[2] == "forward" and args[3] != "--list":
+            self.calls.append(command)
+            if self.mismatch:
+                return pdalink_watch.CommandResult(1, "", "adb: error: more than one device/emulator")
+            if args[3] == "--no-rebind":
+                if self.restore_fails:
+                    return pdalink_watch.CommandResult(1, "", "device offline")
+                self.forwards += f"{args[1]} {args[4]} {args[5]}\n"
+            elif args[3] == "--remove":
+                self.forwards = "\n".join(line for line in self.forwards.splitlines()
+                                          if not line.startswith(args[1] + " "))
+            else:
+                self.forwards += f"{args[1]} {args[3]} {args[4]}\n"
+            return pdalink_watch.CommandResult(0)
+        return super().run(command, timeout)
+
+
+def mismatch_watcher(tmp_path, **options):
+    config = PdaLinkWatchTest().make_config(tmp_path / "watch.json")
+    runner = MismatchRunner()
+    output = io.StringIO()
+    now = [1000.0]
+    watcher = pdalink_watch.PdaLinkWatcher(dataclasses.replace(config, **options), runner=runner,
+                                         probe=ok_probe, stdout=output, boot_clock=lambda: now[0])
+    return watcher, runner, output, now
+
+
+def test_mismatch_restarts_restores_foreign_and_retries(tmp_path):
+    watcher, runner, output, _ = mismatch_watcher(tmp_path)
+    device = pdalink_watch.pdalink_lite.parse_adb_devices(authorized_devices())[0]
+    assert watcher.ensure_forward(device) == (True, "")
+    assert "R39M202FZ7E tcp:22222 tcp:2222" in runner.forwards
+    assert "R3CR406AAGE tcp:18080 tcp:8000" in runner.forwards
+    assert "client Android Debug Bridge version 1.0.41 Version 37.0.0 vs running server" in output.getvalue()
+    assert "restored R39M202FZ7E tcp:22222 tcp:2222" in output.getvalue()
+    assert runner.calls.count(["/adb", "kill-server"]) == 1
+    assert runner.calls.index(["/adb", "forward", "--list"]) < runner.calls.index(["/adb", "kill-server"])
+    assert watcher.state.forward_owned
+
+
+def test_mismatch_backoff_then_later_recovery(tmp_path):
+    watcher, runner, output, now = mismatch_watcher(tmp_path)
+    device = pdalink_watch.pdalink_lite.parse_adb_devices(authorized_devices())[0]
+    assert watcher.ensure_forward(device)[0]
+    runner.mismatch = True
+    runner.forwards = ""
+    ok, error = watcher.ensure_forward(device)
+    assert not ok and "backoff active" in error
+    watcher.ensure_forward(device)
+    assert output.getvalue().count("backoff active") == 1
+    assert runner.calls.count(["/adb", "kill-server"]) == 1
+    now[0] += 301
+    assert watcher.ensure_forward(device)[0]
+    assert runner.calls.count(["/adb", "kill-server"]) == 2
+
+
+def test_mismatch_opt_out_flag_and_env(tmp_path):
+    parser = pdalink_watch.build_parser()
+    with mock.patch.dict("os.environ", {"PDALINK_ADB_SERVER_RESTART": "0"}):
+        args = pdalink_watch.build_parser().parse_args(["once"])
+        assert not pdalink_watch.config_from_args(args).adb_server_restart
+    assert not pdalink_watch.config_from_args(parser.parse_args(["once", "--no-adb-server-restart"])).adb_server_restart
+    watcher, runner, _, _ = mismatch_watcher(tmp_path, adb_server_restart=False)
+    device = pdalink_watch.pdalink_lite.parse_adb_devices(authorized_devices())[0]
+    ok, error = watcher.ensure_forward(device)
+    assert not ok and "restart disabled" in error
+    assert ["/adb", "kill-server"] not in runner.calls
+
+
+def test_mismatch_remove_restores_only_foreign(tmp_path):
+    watcher, runner, _, _ = mismatch_watcher(tmp_path)
+    watcher.state.device_serial = "R3CR406AAGE"
+    watcher.state.forward_owned = True
+    runner.forwards += "R3CR406AAGE tcp:18080 tcp:8000\n"
+    watcher.remove_forward()
+    assert not watcher.state.forward_owned
+    assert "R39M202FZ7E tcp:22222 tcp:2222" in runner.forwards
+    assert "tcp:18080" not in runner.forwards
+    assert not any("--no-rebind" in c and "tcp:18080" in c for c in runner.calls)
+
+
+def test_mismatch_requires_authorized_serial_and_snapshot(tmp_path):
+    watcher, runner, _, _ = mismatch_watcher(tmp_path)
+    device = pdalink_watch.pdalink_lite.parse_adb_devices(authorized_devices())[0]
+    runner.devices = unauthorized_devices()
+    assert not watcher.ensure_forward(device)[0]
+    assert ["/adb", "kill-server"] not in runner.calls
+    runner.devices = authorized_devices()
+    runner.snapshot_fails = True
+    assert "cannot snapshot" in watcher.ensure_forward(device)[1]
+    assert ["/adb", "kill-server"] not in runner.calls
+
+
+def test_failover_forward_error_in_log_and_status(tmp_path):
+    watcher, runner, output, _ = mismatch_watcher(tmp_path, wifi_direct_failover=True,
+                                                adb_server_restart=False)
+    with mock.patch.object(watcher, "direct_ready", return_value=True):
+        assert watcher.reconcile() == 0
+        assert watcher.reconcile() == 0
+    assert "adb-server-mismatch" in watcher.state.health["usb"]
+    assert output.getvalue().count("usb: adb-server-mismatch") == 1
+    watcher.status()
+    assert "health-usb: adb-server-mismatch" in output.getvalue()
+
+
+def test_lite_serial_forward_reports_mismatch(tmp_path, capsys):
+    lite = pdalink_watch.pdalink_lite
+    with mock.patch.object(lite, "adb_run", side_effect=[
+        lite.CommandResult(1, "", "adb: error: more than one device/emulator"),
+        lite.CommandResult(0, authorized_devices(), ""),
+    ]):
+        assert lite.adb_forward_tcp(18080, 8000, "R3CR406AAGE") == 1
+    assert "adb-server-mismatch" in capsys.readouterr().err
+
+
+def test_failover_android_start_error_in_log_and_status(tmp_path):
+    watcher, _, output, _ = mismatch_watcher(tmp_path, wifi_direct_failover=True)
+    with mock.patch.object(watcher, "direct_ready", return_value=True), \
+            mock.patch.object(watcher, "start_android", return_value=(False, "Android service denied")):
+        assert watcher.reconcile() == 0
+        assert watcher.reconcile() == 0
+    assert watcher.state.health["usb"] == "Android service denied"
+    assert output.getvalue().count("usb: Android service denied") == 1
+
+
+def test_mismatch_failed_restore_is_logged(tmp_path):
+    watcher, runner, output, _ = mismatch_watcher(tmp_path)
+    runner.restore_fails = True
+    device = pdalink_watch.pdalink_lite.parse_adb_devices(authorized_devices())[0]
+    assert watcher.ensure_forward(device)[0]
+    assert "restore failed R39M202FZ7E tcp:22222 tcp:2222: device offline" in output.getvalue()
+
+
+def test_mismatch_retry_only_once(tmp_path):
+    watcher, runner, _, _ = mismatch_watcher(tmp_path)
+    original = runner.run
+
+    def still_mismatched(command, timeout):
+        result = original(command, timeout)
+        if command == ["/adb", "start-server"]:
+            runner.mismatch = True
+        return result
+
+    runner.run = still_mismatched
+    device = pdalink_watch.pdalink_lite.parse_adb_devices(authorized_devices())[0]
+    ok, error = watcher.ensure_forward(device)
+    assert not ok and "retry failed" in error
+    assert runner.calls.count(["/adb", "-s", device.serial, "forward", "tcp:18080", "tcp:8000"]) == 2
+    assert runner.calls.count(["/adb", "kill-server"]) == 1
+
+
+def test_normal_forward_does_not_restart_or_inspect_version(tmp_path):
+    config = PdaLinkWatchTest().make_config(tmp_path / "watch.json")
+    runner = FakeRunner(authorized_devices())
+    watcher = pdalink_watch.PdaLinkWatcher(config, runner=runner, probe=ok_probe, stdout=io.StringIO())
+    assert watcher.reconcile() == 0
+    assert not any(c[1:] in (["kill-server"], ["start-server"], ["version"], ["forward", "--list"])
+                   for c in runner.calls if c[0] == "/adb")
+
+
+def test_mismatch_restart_failure_uses_backoff(tmp_path):
+    watcher, runner, _, _ = mismatch_watcher(tmp_path)
+    original = runner.run
+
+    def failed_start(command, timeout):
+        if command == ["/adb", "start-server"]:
+            runner.calls.append(command)
+            return pdalink_watch.CommandResult(1, "", "cannot bind server socket")
+        return original(command, timeout)
+
+    runner.run = failed_start
+    device = pdalink_watch.pdalink_lite.parse_adb_devices(authorized_devices())[0]
+    ok, error = watcher.ensure_forward(device)
+    assert not ok and "start-server failed: cannot bind server socket" in error
+    assert "backoff active" in watcher.ensure_forward(device)[1]
+    assert runner.calls.count(["/adb", "kill-server"]) == 1
+
+
+def test_mismatch_dry_run_never_writes(tmp_path):
+    watcher, runner, output, _ = mismatch_watcher(tmp_path, dry_run=True)
+    device = pdalink_watch.pdalink_lite.parse_adb_devices(authorized_devices())[0]
+    assert watcher.ensure_forward(device)[0]
+    assert "dry-run:" in output.getvalue()
+    assert not watcher.state.forward_owned
+    assert runner.calls == [["/adb", "-s", device.serial, "forward", "--list"]]
+
+
+def test_lite_ambiguous_error_for_unauthorized_serial_is_unchanged(capsys):
+    lite = pdalink_watch.pdalink_lite
+    with mock.patch.object(lite, "adb_run", side_effect=[
+        lite.CommandResult(1, "", "adb: error: more than one device/emulator"),
+        lite.CommandResult(0, unauthorized_devices(), ""),
+    ]):
+        assert lite.adb_forward_tcp(18080, 8000, "R3CR406AAGE") == 1
+    output = capsys.readouterr()
+    assert "adb-server-mismatch" not in output.err
+    assert "more than one device/emulator" in output.out
