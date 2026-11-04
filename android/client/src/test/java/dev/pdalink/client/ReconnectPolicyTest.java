@@ -11,6 +11,10 @@ public class ReconnectPolicyTest {
         assertEquals(60000L, ReconnectPolicy.delayMillis(4));
         assertEquals(60000L, ReconnectPolicy.delayMillis(Integer.MAX_VALUE));
         assertEquals(5000L, ReconnectPolicy.delayMillis(-1));
+        assertEquals(2000L, ReconnectPolicy.pinnedDelayMillis(0));
+        assertEquals(8000L, ReconnectPolicy.pinnedDelayMillis(2));
+        assertEquals(30000L, ReconnectPolicy.pinnedDelayMillis(4));
+        assertEquals(30000L, ReconnectPolicy.pinnedDelayMillis(Integer.MAX_VALUE));
     }
 
     @Test public void normalizesUnicastBssidIncludingLocallyAdministeredDirectMac() {
@@ -54,7 +58,7 @@ public class ReconnectPolicyTest {
     }
 
     @Test public void onlyPinnedRequestsTimeOut() {
-        assertEquals(60_000, ReconnectPolicy.timeoutMillis(PIN));
+        assertEquals(15_000, ReconnectPolicy.timeoutMillis(PIN));
         assertEquals(0, ReconnectPolicy.timeoutMillis(null));
         assertEquals(0, ReconnectPolicy.timeoutMillis("02:00:00:00:00:00"));
     }

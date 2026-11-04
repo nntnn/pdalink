@@ -428,7 +428,10 @@ public final class PdaLinkVpnService extends VpnService {
         releaseWifiRequest();
         sendStatus(getString(R.string.status_starting), detail);
         updateNotification(getString(R.string.waiting_for_wifi));
-        mainHandler.postDelayed(retry, ReconnectPolicy.delayMillis(retryAttempt++));
+        long delay = reconnectPolicy.requestBssid(savedBssid) != null
+                ? ReconnectPolicy.pinnedDelayMillis(retryAttempt++)
+                : ReconnectPolicy.delayMillis(retryAttempt++);
+        mainHandler.postDelayed(retry, delay);
     }
 
     private void releaseNetwork() {

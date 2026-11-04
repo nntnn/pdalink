@@ -5,7 +5,9 @@ import java.util.Locale;
 
 final class ReconnectPolicy {
     static final int BSSID_CHANGE_CHECKS = 3;
-    static final int PINNED_TIMEOUT_MS = 60_000;
+    // Pinned requests are auto-approved (no dialog to race). The platform does not retry a
+    // pinned connect that failed while the group was down, so expire it quickly and re-request.
+    static final int PINNED_TIMEOUT_MS = 15_000;
     private int changedBssidChecks;
 
     static String normalizeBssid(String value) {
@@ -51,6 +53,10 @@ final class ReconnectPolicy {
     static int timeoutMillis(String requestBssid) {
         // Zero means use requestNetwork's overload without a timeout: approval can take minutes.
         return normalizeBssid(requestBssid) == null ? 0 : PINNED_TIMEOUT_MS;
+    }
+
+    static long pinnedDelayMillis(int attempt) {
+        return Math.min(30000L, 2000L << Math.max(0, Math.min(attempt, 4)));
     }
 
     static long delayMillis(int attempt) {
