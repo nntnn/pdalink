@@ -3168,6 +3168,14 @@ def adb_stop_android_proxy() -> int:
 def adb_forward_tcp(local_port: int, remote_port: int, serial: str = "") -> int:
     target = ["-s", serial] if serial else []
     result = adb_run([*target, "forward", f"tcp:{local_port}", f"tcp:{remote_port}"], timeout=10.0)
+    if serial and adb_ambiguous_serial_failure(result):
+        devices = adb_run(["devices", "-l"], timeout=5.0)
+        if devices.returncode == 0 and any(
+            d.serial == serial and d.state == "device" for d in parse_adb_devices(devices.stdout)
+        ):
+            print("adb-server-mismatch: serial-selected forward failed for authorized device; "
+                  "run the watcher for automatic recovery, or restart the server with the same adb binary "
+                  "(kill-server then start-server; this drops all forwards)", file=sys.stderr)
     print_adb_result(result)
     if result.returncode == 0:
         print(f"adb forward tcp:{local_port} tcp:{remote_port}")
@@ -3180,6 +3188,10 @@ def adb_remove_forward(local_port: int) -> int:
     if result.returncode == 0:
         print(f"removed adb forward tcp:{local_port}")
     return result.returncode
+
+
+def adb_ambiguous_serial_failure(result: CommandResult) -> bool:
+    return result.returncode != 0 and "more than one device/emulator" in (result.stderr + result.stdout).lower()
 
 
 def adb_run(args: list[str], timeout: float) -> CommandResult:

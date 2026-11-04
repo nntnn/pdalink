@@ -152,6 +152,8 @@ class WatchConfig:
     wifi_direct_failover: bool = False
     usb_return_delay: float = 20.0
     transport_min_dwell: float = 30.0
+    adb_server_restart: bool = True
+    adb_server_restart_backoff: float = 300.0
 
     @property
     def effective_proxy_url(self) -> str:
@@ -291,6 +293,8 @@ class PdaLinkWatcher:
         self.wake_event = threading.Event()
         self.selected_serial = ""
         self.dbus_server = None
+        self.adb_restart_after = 0.0
+        self.error_log_after: dict[str, float] = {}
 
     def log(self, message: str) -> None:
         print(message, file=self.stdout, flush=True)
@@ -310,6 +314,66 @@ class PdaLinkWatcher:
             self.log("dry-run: " + " ".join(command))
             return CommandResult(0, "", "")
         return self.runner.run(command, timeout)
+
+    def log_error(self, message: str) -> None:
+        now = self.boot_clock()
+        if now >= self.error_log_after.get(message, float("-inf")):
+            self.log(message)
+            self.error_log_after[message] = now + 60.0
+
+    def run_forward(self, command: list[str], timeout: float = 10.0) -> CommandResult:
+        result = self.run_write(command, timeout)
+        serial = command[2] if command[1:2] == ["-s"] else ""
+        if not serial or not pdalink_lite.adb_ambiguous_serial_failure(result):
+            return result
+        devices, listed = self.list_devices()
+        if listed.returncode or not any(d.serial == serial and d.state == "device" for d in devices):
+            return result
+        reason = "adb-server-mismatch: serial-selected forward failed for authorized device"
+        if not self.config.adb_server_restart:
+            reason += "; automatic adb server restart disabled"
+        elif self.boot_clock() < self.adb_restart_after:
+            reason += "; adb server restart backoff active"
+        else:
+            # Never drop foreign forwards unless we have a successful snapshot.
+            snapshot = self.run_read(self.adb_command(["forward", "--list"]), 5.0)
+            if snapshot.returncode:
+                reason += "; cannot snapshot forwards: " + (snapshot.stderr or snapshot.stdout).strip()
+            else:
+                self.adb_restart_after = self.boot_clock() + self.config.adb_server_restart_backoff
+                version = self.run_read(self.adb_command(["version"]), 5.0)
+                version_text = " ".join(version.stdout.split()) or "unknown"
+                self.log_error(f"adb-server-mismatch: client {version_text} vs running server; restarting adb server")
+                for action in ("kill-server", "start-server"):
+                    restarted = self.run_write(self.adb_command([action]), 10.0)
+                    if restarted.returncode:
+                        reason += f"; {action} failed: " + (restarted.stderr or restarted.stdout).strip()
+                        break
+                else:
+                    for forward in pdalink_lite.parse_adb_forward_list(snapshot.stdout):
+                        owned = (self.state.forward_owned
+                                 and forward.serial == self.state.device_serial
+                                 and forward.local == f"tcp:{self.state.local_port}"
+                                 and forward.remote == f"tcp:{self.state.remote_port}")
+                        if owned:
+                            continue
+                        restored = self.run_write(self.adb_command(
+                            ["forward", "--no-rebind", forward.local, forward.remote], forward.serial), 10.0)
+                        detail = f"{forward.serial} {forward.local} {forward.remote}"
+                        if restored.returncode:
+                            self.log_error("adb-server-mismatch: restore failed " + detail + ": "
+                                           + (restored.stderr or restored.stdout).strip())
+                        else:
+                            self.log("adb-server-mismatch: restored " + detail)
+                    self.state.forward_owned = False
+                    retried = self.run_write(command, timeout)
+                    if retried.returncode == 0:
+                        return retried
+                    result = retried
+                    reason += "; retry failed"
+        detail = reason + ": " + (result.stderr or result.stdout).strip()
+        self.log_error(detail)
+        return CommandResult(result.returncode, result.stdout, detail)
 
     def state_signature(self) -> tuple[object, ...]:
         return (
@@ -517,7 +581,7 @@ class PdaLinkWatcher:
             ["forward", f"tcp:{self.config.local_port}", f"tcp:{self.config.remote_port}"],
             serial=device.serial,
         )
-        result = self.run_write(command, timeout=10.0)
+        result = self.run_forward(command, timeout=10.0)
         if result.returncode != 0:
             return False, (result.stderr or result.stdout).strip() or "adb forward failed"
         self.state.forward_owned = not self.config.dry_run
@@ -723,7 +787,7 @@ class PdaLinkWatcher:
     def remove_forward(self, device: pdalink_lite.AdbDevice | None = None) -> None:
         if not self.state.forward_owned:
             return
-        result = self.run_write(
+        result = self.run_forward(
             self.adb_command(
                 ["forward", "--remove", f"tcp:{self.config.local_port}"],
                 serial=device.serial if device else self.state.device_serial,
@@ -813,18 +877,23 @@ class PdaLinkWatcher:
         devices, result = self.list_devices()
         device = self.choose_device(devices) if result.returncode == 0 else None
         usb_ok = False
+        usb_error = (result.stderr or result.stdout).strip() if result.returncode else "unavailable"
         if device is not None:
             forward = self.forward_check(device.serial)
+            usb_error = forward.conflict or "USB proxy unreachable"
             if not forward.conflict:
                 if not forward.ok or not self.probe(usb_url, 2.0).ok:
-                    started, _ = self.start_android(device)
+                    started, usb_error = self.start_android(device)
                     if started:
-                        forwarded, _ = self.ensure_forward(device)
+                        forwarded, usb_error = self.ensure_forward(device)
                         if forwarded and self.state.forward_owned:
                             self.state.device_serial = device.serial
                             self.state.local_port = self.config.local_port
                             self.state.remote_port = self.config.remote_port
                 usb_ok = self.forward_check(device.serial).ok and self.probe(usb_url, 2.0).ok
+        if not usb_ok:
+            usb_error = usb_error or "USB proxy unreachable"
+            self.log_error("usb: " + usb_error)
         now = self.boot_clock()
         if not usb_ok:
             self.usb_healthy_since = None
@@ -848,7 +917,7 @@ class PdaLinkWatcher:
         if not ok:
             return self.cleanup("service-start-failed", device, error,
                                 "system-service-failed", stop_android=False)
-        health = {"proxy": "ready", "system": "ready", "usb": "ready" if usb_ok else "unavailable"}
+        health = {"proxy": "ready", "system": "ready", "usb": "ready" if usb_ok else usb_error}
         internet = self.check_internet()
         if internet:
             health["internet"] = internet
@@ -1217,6 +1286,10 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--wifi-direct-failover", action="store_true",
                         default=os.getenv("PDALINK_WIFI_DIRECT_FAILOVER", "0") == "1")
     parser.add_argument("--adb", default=default_adb_path())
+    parser.add_argument("--no-adb-server-restart", dest="adb_server_restart", action="store_false",
+                        default=os.getenv("PDALINK_ADB_SERVER_RESTART", "1") != "0")
+    parser.add_argument("--adb-server-restart-backoff", type=float, default=300.0,
+                        help="minimum seconds between adb server restart attempts (default: 300)")
     parser.add_argument("--transport", choices=("adb", "product-usb"), default=os.getenv("PDALINK_WATCH_TRANSPORT", "adb"))
     parser.add_argument("--local-port", type=int, default=DEFAULT_LOCAL_PORT)
     parser.add_argument("--remote-port", type=int, default=DEFAULT_REMOTE_PORT)
@@ -1253,6 +1326,8 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
 def config_from_args(args: argparse.Namespace) -> WatchConfig:
     return WatchConfig(
         adb=args.adb,
+        adb_server_restart=args.adb_server_restart,
+        adb_server_restart_backoff=max(60.0, args.adb_server_restart_backoff),
         wifi_direct_failover=args.wifi_direct_failover,
         transport=args.transport,
         local_port=args.local_port,
